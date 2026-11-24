@@ -121,6 +121,28 @@ for root, dirs, files in os.walk(repo):
             swapped += 1
 print("%d files had a name or a PC path replaced" % swapped)
 
+# ---- the donation link (owner, 2026-11-24): the ONE place a real name may show, by the owner's choice ----
+# It is kept in app/repo/support_link.txt (not copied), put where the front page says {{SUPPORT_LINK}} and
+# into .github/FUNDING.yml (GitHub's Sponsor button). It goes in AFTER the name swap, which would break it.
+SUPPORT = ""
+sl = os.path.join(lr, "app", "repo", "support_link.txt")
+if os.path.exists(sl):
+    SUPPORT = open(sl).read().strip()
+    if not re.fullmatch(r"https://paypal\.me/[A-Za-z0-9]{1,20}", SUPPORT):
+        sys.exit("support_link.txt does not hold a plain paypal.me link")
+front = os.path.join(repo, "README.md")
+page = open(front, "rb").read()
+if SUPPORT:
+    if page.count(b"{{SUPPORT_LINK}}") < 1:
+        sys.exit("the front page has no {{SUPPORT_LINK}} to fill")
+    open(front, "wb").write(page.replace(b"{{SUPPORT_LINK}}", SUPPORT.encode()))
+    os.makedirs(os.path.join(repo, ".github"), exist_ok=True)
+    with open(os.path.join(repo, ".github", "FUNDING.yml"), "w", newline="\n") as f:
+        f.write('custom: ["%s"]\n' % SUPPORT)
+    print("donation link written to the front page and .github/FUNDING.yml")
+elif b"{{SUPPORT_LINK}}" in page:
+    sys.exit("the front page wants a donation link and app/repo/support_link.txt is missing")
+
 # ---- refuse anything that must not be published ----
 bad = []
 for root, dirs, files in os.walk(repo):
@@ -148,7 +170,10 @@ for root, dirs, files in os.walk(repo):
             # (the account name in the repository's own address is the one place the name may stay)
             account = (PARTS[0].lower() + "jn12").encode()
             if not is_data(rel):
-                if PARTS[0].lower().encode() in t.lower().replace(account, b""):
+                seen = t.lower().replace(account, b"")
+                if SUPPORT and rel in ("README.md", ".github/FUNDING.yml"):
+                    seen = seen.replace(SUPPORT.lower().encode(), b"")	# the donation link, and only there
+                if PARTS[0].lower().encode() in seen:
                     bad.append((rel, "still names the owner"))
                 if PARTS[1].encode() in t.lower() or (b"c:\\us" + b"ers") in t.lower() or (b"/us" + b"ers/") in t.lower():
                     bad.append((rel, "still holds a PC user path"))

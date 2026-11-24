@@ -69,3 +69,10 @@ GPL-3.0: see [LICENSE](LICENSE). Whose work Prism stands on: [NOTICE.md](NOTICE.
 
 Prism is not made, approved or supported by Sony. It contains no Sony artwork, logos or sounds.
 Copy only discs you own, for your own use, where your law allows it.
+
+## Support
+
+Prism is free. If it saved you some time and you want to say thanks, you can send a
+tip here: https://paypal.me/AveryNordbye17
+
+A tip is a gift. It buys no support, no features and no warranty: the [terms](TERMS.md) apply either way.
