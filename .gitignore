@@ -1,0 +1,7 @@
+app/build/
+app/out/
+app/logs/
+*.o
+*.elf
+*.map
+__pycache__/

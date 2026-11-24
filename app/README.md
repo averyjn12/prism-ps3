@@ -1,0 +1,127 @@
+# Prism app (PS3 side) - started 2026-11-22
+
+Owner's idea, 2026-11-22 ~16:10 CST: a launcher like IRISMAN, started from the XMB Game column,
+running on the PS3 side, showing PS1, PS2 and PS3 games and the memory cards. PS1 / PS3 games start
+straight from it; a PS2 game is handed to the PS2 emulator, whose stage2 reads it from the card.
+Owner's decisions the same evening: **make the app read exFAT** (do not wipe the card to all-FAT32
+until it is certain the app cannot); download whatever is needed; the saves on the console are not
+important, so memory-card writes may be tested on them.
+
+## Why this shape
+
+| Need | How |
+|---|---|
+| PS1 / PS3 start at once | the app asks webMAN on 127.0.0.1 (`/mount_ps3/<path>`, the call the XMB icon makes; proven for PS1 from `/dev_sd` on 2026-11-22) |
+| PS2 from the card | the bench path, proven R5-R7: write the one-shot trigger `/dev_hdd0/tmp/prism_lr.cfg` (`mode=iso path=...`), mount a carrier title, start it; the stage2 serves the card file |
+| exFAT, which GameOS cannot see (it mounts only the first partition, FAT32, as `/dev_sd`) | read the card as raw sectors (lv2 syscalls 600/602/609, SD device `0x103000100000010`, psdevwiki DeviceID) with the stage2's own reader `lr_fs.c`, compiled unchanged |
+| PS3 / PS1 games ON exFAT (later) | webMAN's `rawseciso` mounts ISOs from raw sector lists (how it plays from NTFS/exFAT USB drives); the app can make those lists with the same reader |
+| the 64 KB stage2 limit | the menus leave the stage2; it stays a "serve this file" engine |
+
+## Layout
+
+- `src/main.c` - the loop: pad, screens, starts (`launch.c`), the probe on START (`probe.c`)
+- `src/ui.c`, `src/screens.c`, `src/look.h` - the PS2 launcher's look, ported: a software
+  rasterizer in the launcher's own 640 x 448 coordinates scaled onto a 1280 x 720 canvas
+  (`gfx.c` scales to the TV), DejaVu at 22/26/31/42 px (`tools/gen_font_ps3.py`)
+- `src/art.c` - covers from `/dev_hdd0/tmp/prism_art.dat` (the launcher's art file)
+- `src/vmc.c` - reads the virtual memory cards in `/dev_hdd0/savedata/vmc` (PS2 `.VM2`, PS1 `.VM1`),
+  saves, titles, icons (PS2 3D models, PS1 16 x 16 frames)
+- `src/vmcw.c` - copies / deletes saves; ECC per page; keeps `<card>.orig` (before Prism ever
+  changed it) and `<card>.last` (before the latest change) in `/dev_hdd0/tmp/prism_vmc_bak`
+- `src/mcard.c` - the MEMORY CARD screen
+- `src/fsport_ps3.c`, `src/storage.h` - lr_fs.c's block layer on the raw SD device (read-only)
+- `src/stub/ps2emu/*.h` - empty stand-ins so `lr/tree/ps2emu_stage2/prism/lr_fs.c` compiles as is
+- `host/` - the same reader built for the PC (`fsprobe`), tested against the Linux-made cards in
+  `emu/cards` (`run_host_tests.sh` -> `test_fsport.py`, ground truth = `emu/cards/manifest.txt`)
+- `build_app.sh` - PSL1GHT build -> `out/prism_app.pkg` (title ID `PRSM00001`, icon = the launcher's)
+- `tools/` - toolchain scripts (PSL1GHT `dd4e8c9`, 2026-11-04, built in WSL PSBBN into ~/ps3dev),
+  `expect_probe.py` (what the probe must read, from the PC copies of the games)
+- `host/render.sh` - draws every screen on the PC into `host/shots/*.ppm` from the real art file
+  and real card files (same ui.c / screens.c / mcard.c / vmc.c as the console build)
+- `host/vmc_test.sh` - the card writer on COPIES of the owner's cards, judged by **mymcplus**
+  (an outside PS2 card reader, `pip install mymcplus`; its `check` + a read of every file with ECC
+  checking, through `host/mc_compare.py`), `host/vmc_inspect.py` (ECC of every page) and
+  `host/ps1_card.py` (PS1 fixtures + an independent check). Calibrated: mymcplus `check` alone
+  passes a card with bad ECC (it does not read file data) - the per-file read is what catches it.
+  Mutants that must fail it (2026-11-22, all three do): no ECC written; a chain one cluster short;
+  a delete that frees nothing. Run `VMCW=<mutant.c> host/vmc_test.sh ...` to plant one.
+
+## Rules
+
+- Do not build the app or run the host tests while `emu/mutate5.py` runs (it plants bugs in lr_fs.c).
+- The card is only ever READ by the app until a step says otherwise.
+- Nothing is copied to the hard disk; nothing is written to flash.
+
+## Steps
+
+1. Probe: raw SD open, both partitions mounted, list, known bytes in GTASA and the split MGS2, raw
+   read speed. **PASSED on the console 2026-11-22 16:31 CST (Amendment G5): exFAT read, 8/8 byte checks, 16.1 MB/s raw.**
+2. A picture: home tiles, lists (PS1 / PS2 / PS3), covers. (v0.2-v0.5: one list screen, tabs,
+   DejaVu text drawn in software; the full launcher look is still to port.)
+3. **Direct starts, no XMB in between - DONE in v0.5 (2026-11-22 19:07 CST):** PS1 = webMAN
+   `/mount_ps3` + exit-spawn of `ps1_emu.self` (owner: Metal Gear Solid); PS2 = trigger + carrier
+   mount + `sys_sm_shutdown(0x8202, block, 0x4F0)` with the block this console's XMB sends
+   (`src/ps2_block.h`, captured from inside ps2_gxemu; owner: San Andreas off exFAT); PS3 =
+   `/mount_ps3` + exit-spawn of the disc's EBOOT (not run yet). Why every other route failed, and
+   the firmware addresses: Amendment G5b. webMAN Auto-Play stays OFF (owner).
+4. PS3 / PS1 from exFAT through rawseciso sector lists. (PS3 on FAT32 already works as a folder:
+   Borderlands BLUS30386 ripped 2026-11-22 over FTP from /dev_bdvd to the PC (`~/ps3_rips`, sizes =
+   the disc's listing) and copied to `/dev_sd/GAMES/BLUS30386`; all 550 files read back = PC copy,
+   SHA-256. Not started from the app yet. Building an ISO needs makeps3iso: running the downloaded
+   tool was refused by the permission check, so folders until the owner allows it.)
+5. Memory cards (`.VM2` / `.VM1` on the hard disk): view, then copy / delete. **Built in v0.8
+   (2026-11-22 19:43 CST), not yet run on the console.** Every card, L1 / R1 between them; each
+   save floats and turns by its own icon; X: Copy to <card of the same kind> / Delete / Cancel,
+   then a question that starts on "No". What the writer copies from real cards (measured with
+   `host/vmc_inspect.py` on the owner's three cards): ECC 3 bytes per 128-byte chunk + 4 zero bytes,
+   6327 of 6327 written pages; the PS2 deletes by clearing the entry's 0x8000 and each FAT entry's
+   allocated bit, keeping the links; a save's "." holds length 0 (the count is in its root entry).
+   PC result: `host/vmc_test.sh` 0 failures (13 saves compared byte for byte through mymcplus).
+
+## Versions
+
+| | built | on the console | what |
+|---|---|---|---|
+| 0.5 | 19:07 | yes | direct PS1 / PS2 / PS3 starts |
+| 0.6 | 19:13 | yes (installed) | passes `PRISM_PS1_1.VM1` to the PS1 emulator |
+| 0.7 | 19:25 | install not confirmed (console went to PS2 mode during it) | the launcher's look: home tiles, carousel with covers, A-Z, search, starting screen |
+| 0.8 | 19:43 | yes, 20:08 (EBOOT read back = build) | MEMORY CARD screen: view, copy, delete |
+| 0.9 | 20:42 | yes, 20:45 (EBOOT read back = build) | PS3 game FOLDERS in /dev_sd/GAMES (named by PARAM.SFO TITLE); **PS1 card passed by NAME** (`PRISM_PS1_1.VM1`): v0.4-v0.8 passed the full path and MGS said "no memory card" (owner, 20:4x). IRISMAN's psx_launch passes names; the emulator opens them in /dev_hdd0/savedata/vmc |
+| 0.10 | 21:40 | yes, 21:4x (EBOOT read back = build) | (1) drawing: triangles walk only their row span, covers / gradients / prism colours / text in integers (PPU float->int conversions stall); PC: PS2 list 7.1 -> 3.9 ms/frame, every screen within 2 levels of v0.9 except ~1 font texel on sleeve initials; `/dev_hdd0/tmp/prism_perf.log` = console frame times. (2) PS2 start deletes `/dev_hdd0/tmp/turnoff` first (owner: "not turned off properly" after every PS2 game from the app; webMAN DELETE_TURNOFF). (3) PS3 games: webMAN starts them from the XMB - `/dev_hdd0/tmp/wm_request` = `/play.ps3<path>`, a poke so webMAN reads it, app quits (owner: Borderlands went back to the XMB on direct boot: trophy path). Needs webMAN setup s (wait additionally) = 3, restored 21:3x |
+| 0.11 - 0.37 | 11-22 / 11-23 | yes | not listed here: see the memory note `prism-s36-lr-stage2.md` and `HANDOFF_rip_exfat.md` |
+| 0.38 - 0.42 | 11-23 17:40 - 19:05 | yes | PS1 / PS2 disc copy (`drive.c`, `ripcore.c`, `rip_image.h`); the options menu offers it, and "Copy to another device" for PS2 games on the hard disk; the unlock steps (webMAN unmount + disc put in again). Run table: `../re_notes/ps12_disc_rip_2026-11-23.md` |
+| 0.43 | 11-23 19:32 | yes (EBOOT read back = build) | title list `USRDIR/titles.txt` (22,878 IDs) names discs and copies; CD gap window 156 sectors |
+| 0.44 | 11-23 20:43 | see the run table | never reads through a game image Cobra shows in place of the drive (the "Guitar Hero II copied as Loaded" bug); IRISMAN's many-sectors-a-command CD read behind first-run checks; the list line says where every game is, PS2 games on the card too |
+| 0.45 | 11-23 21:00 | yes, 21:09 (EBOOT read back = build) | the list shows a copy's title without the " (SLUS_...)" its file name carries |
+| 0.46 | 11-23 21:15 | see the run table | Settings -> Help (10 pages, `src/help.c`); terms of use shown once per console before anything else (`TERMS.md`, `USRDIR/terms_ok.txt`); the fast CD read is OFF (it worked and was no faster: the drive reads CDs at about 4x); `tools/mk_release.py` makes the download zip with the terms first |
+
+## Giving Prism to other people
+
+Never hand out the bare `.pkg`. `python tools/mk_release.py <app dir>` makes `out/Prism_<version>.zip`
+(the terms first, then the package) and `out/RELEASE_NOTES_<version>.md` (the text for the release
+page, which opens with "By downloading ... you agree to the terms"). The app shows the same terms on
+a console's first start and does nothing until X is pressed. When `TERMS.md` changes, raise its
+version and `TERMS_VER` in `src/help.h` together (the tool refuses if they differ).
+Owed before a first public release: the licence check of the two title lists (`db/SOURCES.txt`), a
+licence for Prism's own code, and Bananafuzzbuddy's go-ahead. Nothing has been published.
+
+### v0.47 (11-23 21:33) and the licence question
+
+| | built | on the console | what |
+|---|---|---|---|
+| 0.47 | 11-23 21:33 | see the re_notes | asks the drive for its full CD speed (SET CD SPEED, one first-run question), fast read back on without questions; PS1 title list now from the GPL-3.0 project (the earlier one had no licence) |
+
+Licence facts found 11-23 (not legal advice): PSL1GHT is MIT; webMAN-MOD and IRISMAN are GPL-3.0; the
+title lists come from a GPL-3.0 project (`db/SOURCES.txt`); the PS2 helper Prism installs is built
+from Cobra's stage2 source, which carries GPL files (`lr/tree/ps2emu_stage2`, e.g. the marcan-derived
+debug code); the font is DejaVu Sans (free licence, needs its notice kept). The simplest fit for
+Prism's own code is GPL-3.0, with the source published beside every download. Bananafuzzbuddy decides.
+
+## The GitHub repository (2026-11-23)
+
+`averyjn12/prism-ps3`, PRIVATE, GPL-3.0 (`LICENSE`, `NOTICE.md`). It is an export, made by
+`python tools/export_repo.py "<lr dir>" "C:/path/to/prism-ps3"`, never these working folders: they hold a
+Sony emulator file, key files, game covers and logs that must not be published, and the script refuses if any
+get in. After an export: `git add -A`, commit, push in `C:\path\to\prism-ps3`. A draft pre-release
+"Prism 0.48" with `Prism_0.48.zip` is attached there, not published. Making the repository public is Bananafuzzbuddy's
+decision; the open points are listed in the memory note `prism-ps3-repo.md`.

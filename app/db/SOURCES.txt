@@ -1,0 +1,16 @@
+Title lists packed into USRDIR/titles.txt by tools/mk_titles.py. They are lists of game names by
+product code (text only, "SLUS_214.47|Guitar Hero II"). No game, cover or other game data is in them.
+
+TitlesDB_PS2.csv   PSBBN Definitive Project (CosmicScale), https://github.com/CosmicScale/PSBBN-Definitive-Project
+                   scripts/assets/database/TitlesDB_PS2.csv (copy of lr/launcher/db/TitlesDB_PS2.csv)
+TitlesDB_PS1.csv   the same project, scripts/assets/database/TitlesDB_PS1.csv, last changed in its commit
+                   b9f076aa00b676552574788284c5056b447180ca, downloaded 2026-11-23
+
+Licence: the project is GPL-3.0 (GitHub's licence record for the repository, read 2026-11-23). Its
+credits say the lists contain data from GDX-X's TitlesDB files. A copy of Prism that carries these
+lists has to be given out under terms the GPL-3.0 allows (see app/README.md, "Giving Prism to other
+people").
+
+Removed 2026-11-23 (v0.47): TitlesDB_PS1_English.txt from GDX-X/PFS-BatchKit-Manager. That repository
+states no licence, so the file may not be passed on; v0.43 - v0.46 packages built with it stay on
+Bananafuzzbuddy's own console and PC only.
