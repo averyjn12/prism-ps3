@@ -15,6 +15,9 @@
 #include "check.h"
 #include "setup.h"
 #include "icons.h"
+#include "launch.h"
+#include "storage.h"	/* v0.64: ST_DEV_MS / ST_DEV_CF for the PS2 header */
+#include "cardcheck.h"	/* v0.65: a slot that gives damaged data */
 
 #define QUERY_MAX	16
 
@@ -497,10 +500,15 @@ static const char *kind_name(const game_t *g)
 /* ---- v0.15: a game's options (Square), and deleting it after two questions ---- */
 
 enum { GM_BROWSE, GM_OPTIONS, GM_ASK1, GM_ASK2 };
-enum { OPT_ADD_SC, OPT_DEL_SC, OPT_RIP, OPT_COPY, OPT_DELETE, OPT_CANCEL };
+/* v0.56: a PS2 game on the card: copy it to the hard disk, put it in / take it out of webMAN's list */
+/* v0.58: a wrong cover can be removed for good, and a removed one allowed back (covers.c covers_mark) */
+/* v0.61: a PSP game's own launcher (launch.c psp_launcher_*), when both are installed */
+enum { OPT_ADD_SC, OPT_DEL_SC, OPT_RIP, OPT_COPY, OPT_DELETE, OPT_CANCEL, OPT_COPY_HDD, OPT_WM_ADD, OPT_WM_DEL, OPT_COV_DEL, OPT_COV_ALLOW,
+	OPT_PSPL_REM, OPT_PSPL_MIN };
 static const char *const opt_text[] = { "Add to this list", "Remove from this list", "Copy the disc to a storage device",
-	"Copy to another device", "Delete", "Cancel" };
-static int gm_mode, gm_pick, gm_n, gm_opt[6];
+	"Copy to another device", "Delete", "Cancel", "Copy to the hard disk", "Add to webMAN's list", "Remove from webMAN's list",
+	"Remove its cover", "Let Game covers find its cover", "Start it with the Remaster launcher", "Start it with the Minis launcher" };
+static int gm_mode, gm_pick, gm_n, gm_opt[8];
 static unsigned gm_at;
 static char gm_what[160];
 #define ASK2_ARM	45		/* frames before the last "Delete" takes a press: no double-tap deletes */
@@ -520,8 +528,19 @@ static void gm_options(const game_t *g)
 		 * the card stay where they are (Bananafuzzbuddy, 11-23: a PS2 game's options had no copy entry) */
 		if (plat != P_PS2 || g->where == 2)
 			gm_opt[gm_n++] = OPT_COPY;
+		if (plat == P_PS2 && g->where == 1)
+		{
+			gm_opt[gm_n++] = wm_shortcut_has(g) ? OPT_WM_DEL : OPT_WM_ADD;
+			gm_opt[gm_n++] = OPT_COPY_HDD;
+		}
 		gm_opt[gm_n++] = OPT_DELETE;
 	}
+	if (g->cover)
+		gm_opt[gm_n++] = OPT_COV_DEL;
+	else if (art_refused(g->id))
+		gm_opt[gm_n++] = OPT_COV_ALLOW;
+	if (plat == P_PSP && g->kind < 4 && psp_launchers_installed() == (PSPL_MINIS_ | PSPL_REMASTER))
+		gm_opt[gm_n++] = psp_launcher_for(g) == PSPL_REMASTER ? OPT_PSPL_MIN : OPT_PSPL_REM;
 	gm_opt[gm_n++] = OPT_CANCEL;
 	gm_pick = gm_n - 1;		/* starts on "Cancel" */
 	gm_mode = GM_OPTIONS;
@@ -598,6 +617,42 @@ static void gm_overlay(const game_t *g)
 	}
 }
 
+/* v0.66: where the PS2 list comes from: one card ("SD CARD + HDD"), several ("MS + SD + CF + HDD"), and a slot the check
+ * failed beside sound ones ("SD + HDD · CF BAD") */
+static const char *ps2_where(void)
+{
+	static const char *const sh[3] = { "MS", "SD", "CF" }, *const lo[3] = { "MEMORY STICK", "SD CARD", "COMPACTFLASH" };
+	static char b[64];
+	int s, n = 0, one = 0, len = 0;
+
+	if (card_state == LR_E_BADSLOT)
+	{
+		snprintf(b, sizeof b, "%s: BAD DATA", lo[card_bad_slot >= 0 && card_bad_slot < 3 ? card_bad_slot : 1]);
+		return b;
+	}
+	if (card_state)
+		return "HDD";
+	for (s = 0; s < 3; s++)
+		if (card_read_mask >> s & 1)
+		{
+			n++;
+			one = s;
+		}
+	if (n == 1)
+		len = snprintf(b, sizeof b, "%s + HDD", lo[one]);
+	else
+	{
+		b[0] = 0;
+		for (s = 0; s < 3; s++)
+			if (card_read_mask >> s & 1)
+				len += snprintf(b + len, sizeof b - len, "%s + ", sh[s]);
+		len += snprintf(b + len, sizeof b - len, "HDD");
+	}
+	if (card_bad_slot >= 0 && card_bad_slot < 3 && len < (int)sizeof b - 12)
+		snprintf(b + len, sizeof b - len, " " DOT " %s BAD", sh[card_bad_slot]);
+	return b;
+}
+
 static void draw_games(void)
 {
 	const game_t *g = vg(sel);
@@ -616,7 +671,8 @@ static void draw_games(void)
 	else
 	{
 		snprintf(ln, sizeof ln, " " DOT " %d GAME%s " DOT " A-Z", n_games[plat], n_games[plat] == 1 ? "" : "S");
-		top_right(plat == P_PS2 ? "SD CARD + HDD" : "ALL DEVICES", AMBER, ln, DIM);
+		/* v0.64: the slot the card was really found in (Bananafuzzbuddy 11-24: it said SD CARD with the card in CF) */
+		top_right(plat != P_PS2 ? "ALL DEVICES" : ps2_where(), AMBER, ln, DIM);
 	}
 	carousel();
 	if (g != shown)
@@ -636,7 +692,7 @@ static void draw_games(void)
 		 * Tiny Tees on the card showed "1 MB", the one on the hard disk "1 MB HDD") */
 		char t[24];
 
-		snprintf(t, sizeof t, "%s " DOT " %s", size, where_name(g->where));
+		snprintf(t, sizeof t, "%s " DOT " %s", size, game_where_name(g));	/* v0.66: a card game's own slot */
 		snprintf(size, sizeof size, "%s", t);
 	}
 	if (g->id[0])
@@ -803,7 +859,7 @@ static void draw_home(void)
 		if (n)
 			snprintf(sub[i], sizeof sub[i], "%d game%s", n, n == 1 ? "" : "s");
 		else
-			strcpy(sub[i], p == P_PS2 && card_state ? "Card not read" : "No games yet");
+			strcpy(sub[i], p == P_PS2 && card_state == LR_E_BADSLOT ? "Bad card slot" : p == P_PS2 && card_state ? "Card not read" : "No games yet");
 	}
 	if (n_games[P_PS2] && !ready)
 		strcpy(sub[1], chk.ps2_ok ? "Needs setup" : "Not on this console");
@@ -1080,6 +1136,14 @@ void ui_draw(void)
 			draw_message("No PS1 games", "PS1 games go in /PSXISO on the SD card, the hard disk or a USB", "drive (.bin with its .cue).", "SELECT", "Look again");
 		else if (plat == P_PS3)
 			draw_message("No PS3 games", "PS3 games go in /GAMES (folders) or /PS3ISO on the hard disk or a", "USB drive. A disc in the drive: Square on the menu copies it.", "SELECT", "Look again");
+		else if (card_state == LR_E_BADSLOT)
+		{
+			/* v0.65: cardcheck.h */
+			char l1[100];
+
+			snprintf(l1, sizeof l1, "The %s slot gives back damaged data from this card,", slot_name(card_bad_slot));
+			draw_message("Card slot gives bad data", l1, "most likely the adaptor. Nothing is read or written there. Try another slot.", "SELECT", "Look again");
+		}
 		else if (card_state)
 		{
 			char l2[80];
@@ -1259,7 +1323,8 @@ int ui_pad(unsigned pressed, unsigned held)
 			gm_mode = GM_BROWSE;
 		else if (pressed & PAD_CROSS)
 		{
-			static const int act[] = { DO_SC_ADD, DO_SC_DEL, DO_RIP, DO_COPYGAME, DO_DELETE_ASK, DO_NOTHING };
+			static const int act[] = { DO_SC_ADD, DO_SC_DEL, DO_RIP, DO_COPYGAME, DO_DELETE_ASK, DO_NOTHING,
+				DO_COPYGAME, DO_WM_ADD, DO_WM_DEL, DO_COV_DEL, DO_COV_ALLOW, DO_PSPL_REM, DO_PSPL_MIN };
 
 			gm_mode = GM_BROWSE;
 			sel_of[plat] = n_view ? view[sel] : 0;

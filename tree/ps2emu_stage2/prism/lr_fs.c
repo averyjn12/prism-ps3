@@ -1041,6 +1041,20 @@ int lr_fs_cat_open(u32 i, u64 *size, int quiet)
 	return open_node(&cat[i].nd, quiet ? NULL : cat[i].name, size);
 }
 
+#ifdef LR_APP
+/* the Prism app only (v0.60, src/pspsd.c: a PSP image on the card served to webMAN by its sectors):
+ * run i of the open file, in the card's own 512-byte sectors. The number of runs, or -1 past the last.
+ * Not compiled into any stage2: LR_APP is defined by app/build_app.sh alone. */
+int lr_fs_run(u32 i, u32 *lba, u32 *n)
+{
+	if (i >= n_ext)
+		return -1;
+	*lba = exts[i].lba;
+	*n = exts[i].n;
+	return (int)n_ext;
+}
+#endif
+
 int lr_file_read(u64 off, u8 *dst, u32 len)
 {
 	while (len)

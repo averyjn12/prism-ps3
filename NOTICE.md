@@ -22,6 +22,10 @@ Entertainment Inc. Prism contains no Sony artwork, logos or sounds.
 | Font | built into `app/src/font_ps3.h`, `launcher/ui/*.ttf` | DejaVu Sans | the DejaVu / Bitstream Vera font licence |
 | PS3 SDK | not included | PSL1GHT and the ps3dev toolchain | MIT (PSL1GHT) |
 | webMAN MOD header excerpts | `app/ref` | webMAN MOD by aldostools and contributors | GPL-3.0 |
+| Fake ISO volume template, and a port of prepISO's fake-ISO builder (PSP games played from a card) | `app/src/fake_iso_data.h` (unchanged), `app/src/pspsd_core.c` | webMAN MOD's prepISO by aldostools and contributors; the fake-ISO idea is Estwald's, from Iris Manager | GPL-3.0 |
+| BearSSL 0.6 (HTTPS for the Game covers page) | not included: `third_party/build_bearssl.sh` builds it, and it is linked into the app | Thomas Pornin, bearssl.org | MIT |
+| Certificate trust anchors | not included: made at build time from the build machine's Mozilla CA bundle | Mozilla | MPL-2.0 |
+| Cover sources | `app/setup/cover_sources.txt` lists the public collections the console looks in when the player asks; Prism includes no covers but Tiny Tees' own | xlenore's PS2 and PS1 cover sets, CosmicScale's PSBBN art database, aldostools' resources | each collection's own terms |
 
 How the disc drive is read was learned from, and each command is cited in `app/src/drive.c` to:
 the Cobra library ("cobralib") as shipped in ManaGunZ (Zarh) and webMAN MOD, multiMAN (deanK),

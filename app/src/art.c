@@ -23,12 +23,27 @@ static int num_after(const char *t, const char *key)
 	return p ? atoi(p + strlen(key)) : -1;
 }
 
+/* v0.57: the file as loaded, for the Game covers page to rebuild it from (covers.c) */
+const u8 *art_bytes(long *len)
+{
+	*len = art ? art_len : 0;
+	return art;
+}
+
 int art_load_from(const char *path)
 {
-	FILE *f = fopen(path, "rb");
+	FILE *f;
 	char head[2049];
 	int i;
 
+	/* v0.57: loaded again after the covers page rewrote it. Every game's cover pointer is into the old
+	 * buffer: the caller re-runs ui_prepare() (main.c rescan) before anything is drawn */
+	free(texs);
+	free(art);
+	texs = NULL;
+	art = NULL;
+	n_rec = 0;
+	f = fopen(path, "rb");
 	if (!f)
 		return -1;
 	fseek(f, 0, SEEK_END);
@@ -48,12 +63,16 @@ int art_load_from(const char *path)
 	fclose(f);
 	memcpy(head, art, 2048);
 	head[2048] = 0;
-	if (strncmp(head, "PRISMART1\n", 10) != 0 || num_after(head, "\nw=") != COVER || num_after(head, "\nh=") != COVER)
-		return -4;
 	n_rec = num_after(head, "\ncount=");
 	data_sec = num_after(head, "\ndata=");
-	if (n_rec <= 0 || data_sec < 1 || 2048L + 128L * n_rec > art_len)
-		return -5;
+	if (strncmp(head, "PRISMART1\n", 10) != 0 || num_after(head, "\nw=") != COVER || num_after(head, "\nh=") != COVER
+		|| n_rec <= 0 || data_sec < 1 || 2048L + 128L * n_rec > art_len)
+	{
+		free(art);	/* v0.57: nothing half-loaded stays */
+		art = NULL;
+		n_rec = 0;
+		return -4;
+	}
 	texs = (tex_t *)calloc(n_rec, sizeof(tex_t));
 	for (i = 0; texs && i < n_rec; i++)
 	{
@@ -91,6 +110,23 @@ const tex_t *art_find(const char *id, const char **title)
 		}
 	}
 	return NULL;
+}
+
+/* v0.58: a record whose cover the player removed: byte 18 has 0x80 (covers_core.h CV_REFUSED) */
+int art_refused(const char *id)
+{
+	int i;
+
+	if (!art || !id[0])
+		return 0;
+	for (i = 0; i < n_rec; i++)
+	{
+		const u8 *r = art + 2048 + 128 * i;
+
+		if (strncmp((const char *)r, id, 11) == 0)
+			return (r[18] & 0x80) != 0;
+	}
+	return 0;
 }
 
 int art_load(void)

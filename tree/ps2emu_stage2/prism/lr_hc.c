@@ -423,7 +423,25 @@ int lr_hc_port_reset(void)
 		return LR_E_STATE;
 
 	v = lr_rd(op, PORTSC1);
+#if defined(PS2HWEMU)
+	/* A01: ps2_emu power-cycles its CURRENT port (*(0x506168) = that PORTSC's EA, stored at
+	 * 0x3AFE0) and makes port 1 current when port 2 is empty. Port 1 is ours only while the
+	 * hub sits on port 2 and the emulator's current port is not port 1. */
+	{
+		u32 p2 = lr_rd(op, PORTSC1 + 4);
+		u64 cur = *(volatile u64 *)(u64)GX_CUR_PORT;
+
+		lr_log("hc: p1 before reset %08x p2 %08x cur %lx\n", v, p2, (unsigned long)cur);
+		if (!(p2 & P_CCS) || cur == op + PORTSC1)
+		{
+			lr_log("hc: port 1 is not ours on this console: not touched\n");
+			broken = 1;
+			return LR_E_STATE;
+		}
+	}
+#else
 	lr_log("hc: p1 before reset %08x\n", v);
+#endif
 	if (!(v & P_CCS) || (v & P_OWNER) || !(v & P_POWER))
 	{
 		lr_log("hc: nothing usable on root port 1\n");

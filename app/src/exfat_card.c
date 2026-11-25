@@ -9,6 +9,8 @@
 #include "exfat_w.h"
 #include "exfat_card.h"
 
+extern u64 card_dev;	/* v0.63: games.c, the slot the card is in */
+
 #define BOUNCE	128	/* sectors per transfer (64 KB) */
 
 static u32 fd;
@@ -74,7 +76,7 @@ int exc_open(exw_dev *d, char *why, int wn)
 
 	exc_close();
 	memset(&info, 0, sizeof info);
-	r = st_info(ST_DEV_SD, &info);
+	r = st_info(card_dev, &info);	/* v0.63: the slot the card is in (games.c scan_ps2) */
 	if (r || info.sector_size != 512 || !info.total_sectors || info.total_sectors >> 32)
 	{
 		if (why && wn > 0)
@@ -85,7 +87,7 @@ int exc_open(exw_dev *d, char *why, int wn)
 		bounce = (u8 *)memalign(128, BOUNCE * 512);
 	if (!bounce)
 		return -2;
-	r = st_open(ST_DEV_SD, &fd);
+	r = st_open(card_dev, &fd);
 	if (r)
 	{
 		if (why && wn > 0)

@@ -25,7 +25,17 @@ enum { DO_NOTHING, DO_START, DO_RESCAN, DO_QUIT, DO_PROBE, DO_RIP,
 	DO_SETUP, DO_UNSETUP, DO_RECHECK, DO_DELETE_ASK, DO_DELETE, DO_COPYGAME, DO_SC_ADD, DO_SC_DEL,
 	DO_AUTOSTART,
 	/* v0.49 */
-	DO_WMFIX };
+	DO_WMFIX,
+	/* v0.55 */
+	DO_WMSC,
+	/* v0.56 */
+	DO_WM_ADD, DO_WM_DEL,
+	/* v0.57: SETTINGS, Game covers (covers.c) */
+	DO_COV_FIND, DO_COV_GET,
+	/* v0.58: a game's Square menu */
+	DO_COV_DEL, DO_COV_ALLOW,
+	/* v0.61: a PSP game's own launcher */
+	DO_PSPL_REM, DO_PSPL_MIN };
 
 extern unsigned frame;		/* 1/60 s since the app started */
 extern int screen, plat;

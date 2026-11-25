@@ -42,6 +42,35 @@ static void lr_capture(int slot)
 #endif
 #define MAX_CHG		20	/* port-change lines kept */
 
+#if defined(PS2HWEMU)
+/* A01 field kit: is the 64 KB stage2 slot (0x021f0000) left alone by ps2_emu? Everything of ours
+ * that never changes after start-up - code and constants (__slot_from .. __reloc_start), TOC and
+ * OPD (from __toc_start) - is summed at start and again at each checkpoint: ~62 of the 64 KB.
+ * Not covered: data and bss (they change by design), .start (run once), and the plain .text of
+ * main.o / patch.o before __slot_from (hwemu/ldscript.ld): Cobra copies the emulator's original
+ * instructions into main.o's hook trampolines AFTER lr_init (seen by the PC harness 2026-11-24). */
+extern u32 __slot_from[], __reloc_start[], __toc_start[], __self_end[];
+static u32 slot0;
+
+static u32 slot_add(u32 s, const u32 *p, const u32 *e)
+{
+	while (p < e)
+		s = ((s << 1) | (s >> 31)) ^ *p++;
+	return s;
+}
+
+static void slot_check(const char *when)
+{
+	u32 s = slot_add(slot_add(0, __slot_from, __reloc_start), __toc_start, __self_end);
+
+	if (!slot0)
+		slot0 = s;
+	lr_log("slot %s: %08x %s\n", when, s, s == slot0 ? "intact" : "CHANGED");
+}
+#else
+#define slot_check(when)	((void)0)
+#endif
+
 static u8 lr_ok, lr_g3_done;
 static u32 lr_polls, lr_sig, lr_nchg;
 
@@ -167,6 +196,7 @@ void lr_init(void)
 	lr_repo_dump();
 #endif
 	lr_snapshot("t0-entry");
+	slot_check("t0");
 	lr_capture(0);
 	lr_sig = lr_port_sig();
 	lr_log_flush();
@@ -197,6 +227,7 @@ void lr_poll(void)
 	{
 		lr_net_try();
 		lr_snapshot("t1-first-atapi");
+		slot_check("t1");
 		lr_capture(1);
 #if PRISM_LR >= 5
 		lr_hc_probe("t1");
@@ -210,6 +241,7 @@ void lr_poll(void)
 	if (lr_polls == LATE_POLL)
 	{
 		lr_snapshot("t2-late");
+		slot_check("t2");
 #if PRISM_LR >= 5
 		lr_hc_probe("t2");
 		lr_card_stats("t2");
@@ -232,6 +264,7 @@ void lr_poll(void)
 	/* early lines too: a small title makes only a few dozen ATAPI commands in all */
 	if (lr_polls == 4 || lr_polls == 16 || (lr_polls & 0x7fff) == 0)
 	{
+		slot_check("run");
 		lr_card_stats(lr_polls == 4 ? "p4" : lr_polls == 16 ? "p16" : "run");
 		lr_log_flush();
 	}

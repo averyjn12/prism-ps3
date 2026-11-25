@@ -15,8 +15,11 @@
 #include "webman.h"
 #include "launch.h"
 #include "check.h"
+#include "pspsd.h"
+#include "cardcheck.h"	/* v0.65: card_lun */
 
-#define TRIGGER	"/dev_hdd0/tmp/prism_lr.cfg"
+/* v0.54: the A01 helper (CECHA / CECHB) reads its own trigger file (lr.h LR_CFG_FILE, hwemu) */
+#define TRIGGER	(chk.a01 ? "/dev_hdd0/tmp/prism_a01.cfg" : "/dev_hdd0/tmp/prism_lr.cfg")
 #define CARRIER	"/dev_hdd0/PS2ISO/Prism Launcher.iso"
 #define GO_FILE	"/dev_hdd0/tmp/prism_go.bat"	/* v0.3's request file, never used now */
 #define PS1EMU	"/dev_flash/ps1emu/ps1_emu.self"
@@ -89,14 +92,19 @@ void launch_cancel(void)
 	sysFsUnlink(GO_FILE);
 }
 
-static int arm(const char *path)
+static int arm(const char *path, int card_lun)
 {
 	char t[512], back[512];
 	FILE *f;
 	int n;
 
+	char lun[24] = "";
+
+	/* v0.65/v0.66: with a card in an earlier slot too, the helper is told the game's slot (cardcheck.h card_lun_for) */
+	if (card_lun >= 0)
+		snprintf(lun, sizeof lun, "lun=%d\n", card_lun);
 	memset(t, '\n', sizeof(t));
-	n = snprintf(t, sizeof(t), "PRISMLR1\nmode=iso\npath=%s\n", path);
+	n = snprintf(t, sizeof(t), "PRISMLR1\nmode=iso\npath=%s\n%s", path, lun);
 	if (n <= 0 || n >= (int)sizeof(t))
 		return -10;
 	t[n] = '\n';
@@ -273,6 +281,103 @@ static int disc_exec(const game_t *g)
 	return game_exec(1, "", g->path);
 }
 
+/* ---- v0.61: which PSP launcher a game starts with (Bananafuzzbuddy 11-24: "a setting for psp games to choose the
+ * launcher it uses"; some games freeze under the minis launcher and run under the remaster one).
+ * USRDIR/psp_launcher.txt, one "key=minis|remaster" a line: key "default" (SETTINGS), or a game's DISC_ID
+ * (its file name when it has none; the Square menu). Nothing there: minis when installed, as before. */
+#define PSPL_FILE	"/dev_hdd0/game/PRSM00001/USRDIR/psp_launcher.txt"
+
+static int pl_read(const char *key)
+{
+	char ln[300];
+	FILE *f = fopen(PSPL_FILE, "rb");
+	int r = 0;
+
+	if (!f)
+		return 0;
+	while (fgets(ln, sizeof ln, f))
+	{
+		char *eq = strrchr(ln, '=');
+
+		ln[strcspn(ln, "\r\n")] = 0;
+		if (!eq)
+			continue;
+		*eq = 0;
+		if (!strcmp(ln, key))
+			r = !strcmp(eq + 1, "remaster") ? PSPL_REMASTER : !strcmp(eq + 1, "minis") ? PSPL_MINIS_ : 0;
+	}
+	fclose(f);
+	return r;
+}
+
+int psp_launchers_installed(void)
+{
+	sysFSStat st;
+
+	return (sysFsStat(PSPL_MINIS, &st) == 0 ? PSPL_MINIS_ : 0) | (sysFsStat(PSPL_UMD, &st) == 0 ? PSPL_REMASTER : 0);
+}
+
+const char *psp_game_key(const game_t *g)
+{
+	const char *s = strrchr(g->path, '/');
+
+	return g->id[0] ? g->id : s ? s + 1 : g->path;
+}
+
+int psp_launcher_pref(const char *key)
+{
+	return pl_read(key ? key : "default");
+}
+
+/* the launcher the game will start with: its own choice, else the default, else minis; one that is not
+ * installed gives way to the other */
+int psp_launcher_for(const game_t *g)
+{
+	int have = psp_launchers_installed(), want = g ? pl_read(psp_game_key(g)) : 0;
+
+	if (!want)
+		want = pl_read("default");
+	if (!want)
+		want = PSPL_MINIS_;
+	return (have & want) ? want : have & PSPL_MINIS_ ? PSPL_MINIS_ : have & PSPL_REMASTER ? PSPL_REMASTER : 0;
+}
+
+/* key NULL = the default; pref 0 = no line for the key */
+int psp_launcher_set(const char *key, int pref)
+{
+	static char out[16384];
+	char ln[300];
+	FILE *f;
+	int k = 0;
+
+	if (!key)
+		key = "default";
+	if (strchr(key, '\n') || strlen(key) > 200)
+		return -1;
+	f = fopen(PSPL_FILE, "rb");
+	if (f)
+	{
+		while (fgets(ln, sizeof ln, f) && k < (int)sizeof out - 300)
+		{
+			char *eq;
+
+			ln[strcspn(ln, "\r\n")] = 0;
+			eq = strrchr(ln, '=');
+			if (!ln[0] || (eq && (int)(eq - ln) == (int)strlen(key) && !strncmp(ln, key, strlen(key))))
+				continue;	/* the old line for this key goes */
+			k += snprintf(out + k, sizeof out - k, "%s\n", ln);
+		}
+		fclose(f);
+	}
+	if (pref)
+		k += snprintf(out + k, sizeof out - k, "%s=%s\n", key, pref == PSPL_REMASTER ? "remaster" : "minis");
+	f = fopen(PSPL_FILE, "wb");
+	if (!f)
+		return -2;
+	fwrite(out, 1, k, f);
+	return fclose(f) == 0 ? 0 : -3;
+}
+
 int launch_prepare(int plat, const game_t *g, spawn_t *sp, char *why, int why_n)
 {
 	sysFSStat st;
@@ -324,14 +429,17 @@ int launch_prepare(int plat, const game_t *g, spawn_t *sp, char *why, int why_n)
 		/* v0.16: webMAN's /mount_ps3 of a file in a PSPISO folder makes Cobra load it as the PSP
 		 * emulator's UMD (webMAN-MOD cobra.c cobra_set_psp_umd); webMAN then leaves you to start the
 		 * PSP launcher on the XMB. The app starts the launcher itself. */
-		const char *pspl = sysFsStat(PSPL_MINIS, &st) == 0 ? PSPL_MINIS : sysFsStat(PSPL_UMD, &st) == 0 ? PSPL_UMD : NULL;
+		/* v0.61: the launcher chosen for this game, or the default (SETTINGS) */
+		const int which = psp_launcher_for(g);
+		const char *pspl = which == PSPL_MINIS_ ? PSPL_MINIS : which == PSPL_REMASTER ? PSPL_UMD : NULL;
 
 		if (!pspl)
 		{
 			snprintf(why, why_n, "the PSP launcher (PSPC66820) is not installed: webMAN's setup can install it");
 			return -43;
 		}
-		r = mount(g->path, why, why_n);
+		/* v0.60: a card's PSP game is mounted (and checked) by pspsd_prepare already */
+		r = pspsd_mounted(g->path) ? 0 : mount(g->path, why, why_n);
 		if (r)
 			return r;
 		/* v0.23: started straight from Prism, as the XMB does (see PSPEMU). webMAN's own
@@ -363,7 +471,7 @@ int launch_prepare(int plat, const game_t *g, spawn_t *sp, char *why, int why_n)
 		 * Tried first; without psp_arg.txt the emulator is not exit-spawned any more. */
 		if (sysFsStat(PSP_ARG_FILE, &st) != 0)
 		{
-			r = game_exec(2, pspl == PSPL_MINIS ? "PSPM66820" : "PSPC66820", g->path);
+			r = game_exec(2, which == PSPL_MINIS_ ? "PSPM66820" : "PSPC66820", g->path);
 			if (r == 0)
 			{
 				sp->self[0] = 0;	/* the XMB starts it once Prism has quit */
@@ -379,7 +487,7 @@ int launch_prepare(int plat, const game_t *g, spawn_t *sp, char *why, int why_n)
 			int k = 0, na = 0;
 			char *p;
 
-			snprintf(arg, sizeof arg, "%s|0", pspl == PSPL_MINIS ? PSPL_MINIS_DIR : PSPL_UMD_DIR);
+			snprintf(arg, sizeof arg, "%s|0", which == PSPL_MINIS_ ? PSPL_MINIS_DIR : PSPL_UMD_DIR);
 			if (fa)
 			{
 				char o[200];
@@ -482,7 +590,17 @@ int launch_prepare(int plat, const game_t *g, spawn_t *sp, char *why, int why_n)
 		snprintf(why, why_n, "the carrier title %s is missing", CARRIER);
 		return -20;
 	}
-	r = arm(g->path);
+	{
+		/* v0.66: the game's own card slot; the A01 helper (CECHA / CECHB) has no lun= line and reads the first slot */
+		int lun = g->where == 1 ? card_lun_for(g->slot) : -1;
+
+		if (lun >= 0 && chk.a01)
+		{
+			snprintf(why, why_n, "on this console the PS2 side reads only the first card slot with a card in it: take out the other card(s) to play this one");
+			return -21;
+		}
+		r = arm(g->path, lun);
+	}
 	if (r)
 	{
 		snprintf(why, why_n, "could not write the trigger file (%d)", r);

@@ -8,6 +8,7 @@
 #include <time.h>
 #include "gfx.h"
 #include "games.h"
+#include "cardcheck.h"	/* v0.65: LR_E_BADSLOT, card_bad_slot */
 #include "screens.h"
 #include "vmc.h"
 #include "setup.h"
@@ -92,6 +93,69 @@ static void shot(const char *name, unsigned at_frame)
 	save(name);
 }
 
+/* v0.66: screenshots to show Prism to people (render.sh <the console's own art file> <dir> showcase): a real library
+ * with real sizes, the console in its ordinary state (webMAN's request file served, Auto-Play off) */
+static int showcase(void)
+{
+	game_t *g;
+	int k;
+
+	g = add(P_PS2, "GTASA.ISO", "SLUS_209.46", 4501209088ULL, 0);
+	g->where = 1, g->slot = 1;
+	g = add(P_PS2, "Guitar Hero II (SLUS_214.47).iso", "SLUS_214.47", 4646305792ULL, 0);
+	g->where = 1, g->slot = 1;
+	g = add(P_PS2, "Metal Gear Solid 2 - Substance (USA).iso", "SLUS_205.54", 6436749312ULL, 0);
+	g->where = 1, g->slot = 1;
+	g = add(P_PS2, "Metal Gear Solid 3 Subsistence (Disc 2) (Persistence) (SLUS_212.43).iso", "SLUS_212.43", 2999189504ULL, 0);
+	g->where = 1, g->slot = 1;
+	add(P_PS2, "Tiny Tees.iso", "SLUS_999.01", 1736704ULL, 0)->where = 2;
+	add(P_PS1, "SLUS_000.76.bin", "SLUS_000.76", 612552528ULL, 1)->where = 0;
+	add(P_PS1, "Metal Gear Solid (USA) (Disc 1) (Rev 1).bin", "SLUS_005.94", 705614112ULL, 1)->where = 0;
+	add(P_PSP, "Spider-Man 3 (USA).iso", "ULUS10317", 1683259392ULL, 0)->where = 0;
+	add(P_PSP, "Call of Duty - Roads to Victory (USA).iso", "ULUS10218", 640974848ULL, 0)->where = 0;
+	add(P_PS3, "Borderlands\xc2\xae", "BLUS30386", 0, 3)->where = 2;
+	card_state = 0;
+	card_bad_slot = -1;
+	card_read_mask = 2;
+	stub_console(1, SU_APP, 0);
+	chk.wm_req = 1;
+	chk.wm_autoplay = 0;
+	ui_prepare();
+
+	intro_draw(2.9f);
+	save("01_intro");
+	ui_home_go(1);
+	shot("02_home", 120);
+	ui_pad(PAD_CROSS, 0);			/* PS2 */
+	shot("03_ps2_games", 300);
+	ui_pad(PAD_RIGHT, 0);
+	shot("04_ps2_next", 420);
+	ui_pad(PAD_SQUARE, 0);			/* its options */
+	shot("05_ps2_options", 440);
+	ui_pad(PAD_CIRCLE, 0);
+	ui_pad(PAD_CIRCLE, 0);
+	ui_home_go(0);				/* PS1 */
+	ui_pad(PAD_CROSS, 0);
+	shot("06_ps1_games", 600);
+	ui_pad(PAD_CIRCLE, 0);
+	ui_home_go(2);				/* PSP */
+	ui_pad(PAD_CROSS, 0);
+	shot("07_psp_games", 700);
+	ui_pad(PAD_CIRCLE, 0);
+	ui_home_go(3);				/* PS3 */
+	ui_pad(PAD_CROSS, 0);
+	shot("08_ps3_games", 800);
+	ui_pad(PAD_CIRCLE, 0);
+	ui_home_go(5);				/* SETTINGS */
+	ui_pad(PAD_CROSS, 0);
+	shot("09_settings", 900);
+	for (k = 0; k < 3; k++)
+		ui_pad(PAD_DOWN, 0);
+	ui_pad(PAD_CROSS, 0);			/* Game covers */
+	shot("10_game_covers", 1000);
+	return 0;
+}
+
 int main(int argc, char **argv)
 {
 	if (argc < 3)
@@ -99,6 +163,8 @@ int main(int argc, char **argv)
 	outdir = argv[2];
 	gfx_init();
 	printf("art records: %d\n", art_load_from(argv[1]));
+	if (argc > 3 && !strcmp(argv[3], "showcase"))
+		return showcase();
 	add(P_PS2, "Metal Gear Solid 2 - Substance (USA).iso", "SLUS_205.54", 6436749312ULL, 0);
 	add(P_PS2, "GTASA.ISO", "SLUS_209.46", 4501209088ULL, 0);
 	add(P_PS2, "Crazy Taxi (USA).bin", "", 700000000ULL, 2);
@@ -269,6 +335,12 @@ int main(int argc, char **argv)
 		ui_home_go(5);
 		ui_pad(PAD_CROSS, 0);
 		shot("v46_settings", 2400);
+		/* v0.62: the bar on a row lower down (the PSP launcher row), then back up to Help */
+		for (k = 0; k < 4; k++)
+			ui_pad(PAD_DOWN, 0);
+		shot("v62_settings_pspl", 2401);
+		for (k = 0; k < 4; k++)
+			ui_pad(PAD_UP, 0);
 		ui_pad(PAD_CROSS, 0);		/* Help */
 		for (k = 0; k < 11; k++)
 		{
@@ -280,6 +352,45 @@ int main(int argc, char **argv)
 		backdrop();
 		terms_draw(1);
 		save("v46_terms");
+	}
+	{
+		/* v0.65: the only card sits in a slot that gives back damaged data (cardcheck.h) */
+		int k;
+
+		for (k = 0; k < 4; k++)
+			ui_pad(PAD_CIRCLE, 0);
+		n_games[P_PS2] = 0;
+		card_state = LR_E_BADSLOT;
+		card_bad_slot = 2;
+		ui_home_go(1);
+		shot("v65_home_badslot", 2600);
+		ui_pad(PAD_CROSS, 0);
+		shot("v65_ps2_badslot", 2610);
+	}
+	{
+		/* v0.66: PS2 games from three cards at once, then a failed CF slot beside a sound SD card */
+		int k;
+
+		for (k = 0; k < 2; k++)
+			ui_pad(PAD_CIRCLE, 0);
+		n_games[P_PS2] = 5;
+		for (k = 0; k < 4; k++)
+		{
+			games[P_PS2][k].where = 1;
+			games[P_PS2][k].slot = (unsigned char)(2 - k % 3);
+		}
+		card_state = 0;
+		card_bad_slot = -1;
+		card_read_mask = 7;
+		ui_prepare();
+		ui_home_go(1);
+		ui_pad(PAD_CROSS, 0);
+		shot("v66_ps2_three_cards", 2700);
+		ui_pad(PAD_RIGHT, 0);
+		shot("v66_ps2_three_cards_next", 2800);
+		card_read_mask = 2;
+		card_bad_slot = 2;
+		shot("v66_ps2_sd_cf_bad", 2900);
 	}
 	return 0;
 }

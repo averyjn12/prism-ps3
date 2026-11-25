@@ -22,7 +22,11 @@ typedef uint32_t u32;
 typedef uint64_t u64;
 typedef int64_t  s64;
 
+#if defined(PS2HWEMU)
+#define LR_VERSION	"2026-11-24-a01k11"	/* A01 field kit 1.1 (app_a01/): + wide emulator check (any fw 4.84-4.93) */
+#else
 #define LR_VERSION	"2026-11-22q"
+#endif
 
 /* ---- Which emulator: the Makefile's -DPS2GXEMU (CECHC/E, the mule) or -DPS2HWEMU (CECHA/B,
  *      ps2_emu; 2026-11-23, NOT YET RUN ON A CONSOLE). The GX_ names below mean "the emulator's"
@@ -118,7 +122,12 @@ void lr_mdelay(u32 ms);
 /* ---- log ---- */
 #define LR_LOG_SZ	0x3000		/* RAM log (on the heap); the whole buffer is what gets written to the file */
 int  lr_fmt(char *out, int size, const char *fmt, ...) __attribute__((format(printf, 3, 4)));
+#if defined(PS2HWEMU)
+/* A01 field kit: its own files, so the E01 helper's trigger and log are never shared */
+#define LR_LOG_FILE	"/tmp/prism_a01.log"	/* = /dev_hdd0/tmp/prism_a01.log, made by the kit app */
+#else
 #define LR_LOG_FILE	"/tmp/prism_lr.log"	/* = /dev_hdd0/tmp/prism_lr.log, must pre-exist, >= LR_LOG_SZ */
+#endif
 void lr_log(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 void lr_log_flush(void);		/* write the RAM log to the file, in place */
 #define LR_TAIL_OFF	0xF000		/* one record in the log FILE, rewritten in place: the latest statistics */
@@ -175,7 +184,11 @@ void lr_ehci_run(void);
 #define LR_E_NOMEDIUM	(-7)
 #define LR_E_NOFILE	(-8)
 
+#if defined(PS2HWEMU)
+#define LR_CFG_FILE	"/tmp/prism_a01.cfg"	/* = /dev_hdd0/tmp/prism_a01.cfg, written by the kit app */
+#else
 #define LR_CFG_FILE	"/tmp/prism_lr.cfg"	/* = /dev_hdd0/tmp/prism_lr.cfg */
+#endif
 #define LR_MARK_OFF	0x7800	/* LR-G6 marker inside a shortcut image: sector 15 */
 #define LR_USB_ADDR	127	/* the emulator's own device sat at 62 on the mule; attach checks for a clash */
 

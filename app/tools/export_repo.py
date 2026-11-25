@@ -50,15 +50,23 @@ for e in os.listdir(repo):
 count = 0
 # the app
 count += copy_tree("app/src")
-# (expect_probe.*: a one-off tool tied to one PC's folders, left out)
-count += copy_tree("app/tools", keep=lambda f: (want_source(f) or f == "font_ps3_atlas.png") and not f.startswith("expect_probe"))
+# (expect_probe.*: a one-off tool tied to one PC's folders, left out; edat.py: it holds Sony's EDAT keys, never published)
+LEFT_OUT_TOOLS = ("edat.py",)
+count += copy_tree("app/tools", keep=lambda f: (want_source(f) or f == "font_ps3_atlas.png") and not f.startswith("expect_probe")
+                   and f not in LEFT_OUT_TOOLS)
 count += copy_tree("app/db")
 count += copy_tree("app/boot")
 count += copy_tree("app/sprx")
 count += copy_tree("app/ref")
 # the PC tests: code and scripts only (no screenshots, no art file with game covers)
 count += copy_tree("app/host", skip_dirs=("shots", "shots_before", "shots_v15", "shots_v22", "shots_v27", "shots_v28", "shots_v46", "sound"))
-for f in ("app/build_app.sh", "app/README.md", "app/setup/carrier.iso", "app/setup/carrier.png", "app/setup/tinytees.iso"):
+for f in ("app/build_app.sh", "app/README.md", "app/setup/carrier.iso", "app/setup/carrier.png", "app/setup/tinytees.iso",
+          # v0.57 / v0.59: what build_app.sh packages besides (the cover SOURCES list, no covers; Tiny Tees' own cover)
+          "app/setup/cover_sources.txt", "app/setup/tinytees_cover.png", "app/setup/tinytees_cover.rgba",
+          # v0.57: BearSSL's build (the library itself is fetched from bearssl.org, not copied)
+          "third_party/build_bearssl.sh",
+          # v0.55: the webMAN shortcut templates build_app.sh makes
+          "app_a01/tools/mk_templates.py"):
     copy_file(f)
     count += 1
 # the PS2 helper: only what its build uses (gxemu). NOT netemu (key files), NOT ps2netemu_gen (a Sony file)
@@ -145,6 +153,15 @@ elif b"{{SUPPORT_LINK}}" in page:
 
 # ---- refuse anything that must not be published ----
 bad = []
+# key VALUES, not only key-file names: every long hex constant in the tools left out for holding keys (v0.66)
+KEYS = set()
+for t in LEFT_OUT_TOOLS:
+    kp = os.path.join(lr, "app", "tools", t)
+    if os.path.exists(kp):
+        KEYS |= {m.lower() for m in re.findall(rb"[0-9A-Fa-f]{32,}", open(kp, "rb").read())}
+if not KEYS and os.path.exists(os.path.join(lr, "app", "tools", "edat.py")):
+    sys.exit("edat.py is there but no key constant was found in it: the key check would be blind")
+print("%d key constant(s) to refuse" % len(KEYS))
 for root, dirs, files in os.walk(repo):
     if ".git" in dirs:
         dirs.remove(".git")
@@ -161,6 +178,12 @@ for root, dirs, files in os.walk(repo):
             bad.append((rel, "from a folder that is left out"))
         if size > 3 * 1024 * 1024:
             bad.append((rel, "over 3 MB (%d)" % size))
+        if f in LEFT_OUT_TOOLS:
+            bad.append((rel, "a tool that holds keys"))
+        if low.endswith(SRC_EXT) or low.endswith(".rgba"):
+            t0 = open(p, "rb").read().lower()
+            if any(k in t0 for k in KEYS):
+                bad.append((rel, "contains a key value"))
         if low.endswith(SRC_EXT):
             t = open(p, "rb").read()
             # (the needles are put together here so that this file does not hold them itself)

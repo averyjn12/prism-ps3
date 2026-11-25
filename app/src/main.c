@@ -23,6 +23,9 @@
 #include "help.h"
 #include "intro.h"
 #include "intro_sound.h"
+#include "covers.h"
+#include "pspsd.h"
+#include "cardcheck.h"	/* v0.65 */
 
 #define TB_HZ		79800000ULL
 
@@ -180,6 +183,12 @@ static int start(const game_t *g)
 		ui_say(msg);
 		return 0;
 	}
+	if (slot_bad_msg(slot_of_game(g), "Not started", msg, sizeof msg))
+	{
+		/* v0.65: the slot gave back damaged data at the last look (cardcheck.h); the game would get the same */
+		ui_say(msg);
+		return 0;
+	}
 	if (plat == P_PS3 && WHERE_SLOT(g->where) && g->kind < 4)
 	{
 		/* v0.22: black screen from the card slot (Borderlands, 2026-11-23); see rip.c ps3_dest */
@@ -201,18 +210,36 @@ static int start(const game_t *g)
 	if (plat == P_PSP && WHERE_SLOT(g->where))
 	{
 		/* v0.30: the PSP launcher does not run a game from the card slot (Bananafuzzbuddy, 11-23): play it
-		 * from a copy on the hard disk (rip.c psp_card_copy; kept for the next start) */
+		 * from a copy on the hard disk (rip.c psp_card_copy; kept for the next start).
+		 * v0.60: first from the card itself, served to webMAN by its sectors (pspsd.c); the copy is
+		 * only the fallback when that cannot be done (prism_pspsd.log says why) */
 		static game_t copy;
+		char pwhy[160];
 
 		copy = *g;
-		r = psp_card_copy(buttons, g, copy.path, sizeof copy.path, msg, sizeof msg);
-		if (r)
+		progress(g, "STARTING", g->shown, 0.2f, "Reading the game on the card");
+		if (pspsd_prepare(g, copy.path, sizeof copy.path, pwhy, sizeof pwhy) == 0)
+			g = &copy;
+		else if (!strstr(pwhy, "plain .iso"))
 		{
+			/* v0.64: the card route failed where it should work: say so, copy nothing (Bananafuzzbuddy 11-24: a CF game
+			 * started a hard-disk copy instead). Only a .cso, which the card route cannot serve, still copies. */
+			snprintf(msg, sizeof msg, "Not started: could not play it from the card: %s. (prism_pspsd.log)", pwhy);
 			ui_say(msg);
 			return 0;
 		}
-		copy.where = 2;
-		g = &copy;
+		else
+		{
+			copy = *g;
+			r = psp_card_copy(buttons, g, copy.path, sizeof copy.path, msg, sizeof msg);
+			if (r)
+			{
+				ui_say(msg);
+				return 0;
+			}
+			copy.where = 2;
+			g = &copy;
+		}
 	}
 	progress(g, "STARTING", g->shown, 0.3f, g->kind == 4 ? "The disc in the drive" : "Mounting the game");
 	r = launch_prepare(plat, g, &spawn, why, sizeof(why));
@@ -366,6 +393,7 @@ int main(int argc, const char *argv[])
 	setup_read();
 	tinytees_install();
 	art_load();
+	tinytees_cover();	/* v0.59: loads the art file again itself if it added the cover */
 	rescan("Looking for games");
 	disc_acted = disc_prev = disc_signature();
 	disc_next = tb() + TB_HZ * 3 / 2;
@@ -457,6 +485,16 @@ int main(int argc, const char *argv[])
 			ui_say(m);
 			last = buttons();
 		}
+		else if (act == DO_WMSC)
+		{
+			/* v0.55: the card's PS2 games in webMAN's list (setup.c wm_shortcuts_add) */
+			char m[220];
+
+			progress(NULL, "ONE MOMENT", "Putting the SD card's PS2 games in webMAN's list", 0.5f, "/dev_hdd0/PS2ISO/SDCARD");
+			wm_shortcuts_add(m, sizeof m);
+			ui_say(m);
+			last = buttons();
+		}
 		else if (act == DO_RECHECK)
 		{
 			progress(NULL, "ONE MOMENT", "Checking the console", 0.5f, "Model, firmware, Cobra, webMAN, the PS2 emulator");
@@ -464,6 +502,69 @@ int main(int argc, const char *argv[])
 			setup_read();
 			settings_open();
 			ui_say(chk.ps2_ok ? "Checked: PS2 games from the card can work here." : "Checked.");
+			last = buttons();
+		}
+		else if (act == DO_COV_FIND || act == DO_COV_GET)
+		{
+			/* v0.57: SETTINGS, Game covers (covers.c) */
+			char m[240];
+
+			if (act == DO_COV_FIND)
+				covers_find(buttons, m, sizeof m);
+			else if (covers_get(buttons, m, sizeof m))
+			{
+				rescan("Putting the new covers on the games");	/* art_load moved every cover pointer */
+				covers_open();
+			}
+			ui_say(m);
+			last = buttons();
+		}
+		else if (act == DO_PSPL_REM || act == DO_PSPL_MIN)
+		{
+			/* v0.61: this game's own PSP launcher; the same as the default = no line of its own */
+			const game_t *g = (const game_t *)ui_chosen();
+			char m[220];
+
+			if (g)
+			{
+				int want = act == DO_PSPL_REM ? PSPL_REMASTER : PSPL_MINIS_, def = psp_launcher_for(NULL);
+
+				if (psp_launcher_set(psp_game_key(g), want == def ? 0 : want) == 0)
+					snprintf(m, sizeof m, "%s will start with the %s launcher.", g->shown, want == PSPL_REMASTER ? "Remaster" : "Minis");
+				else
+					snprintf(m, sizeof m, "Could not save the choice.");
+				ui_say(m);
+			}
+			last = buttons();
+		}
+		else if (act == DO_COV_DEL || act == DO_COV_ALLOW)
+		{
+			/* v0.58: remove a wrong cover for good, or let it be looked up again (covers.c covers_mark) */
+			const game_t *g = (const game_t *)ui_chosen();
+			static game_t keep;
+			char m[220];
+
+			if (g)
+			{
+				keep = *g;
+				if (covers_mark(&keep, plat, act == DO_COV_DEL, m, sizeof m))
+					rescan("Putting the covers on the games");	/* art_load moved every cover pointer */
+				ui_say(m);
+			}
+			last = buttons();
+		}
+		else if (act == DO_WM_ADD || act == DO_WM_DEL)
+		{
+			/* v0.56: one card PS2 game in / out of webMAN's list (setup.c wm_shortcut_one) */
+			const game_t *g = (const game_t *)ui_chosen();
+			char m[220];
+
+			if (g)
+			{
+				progress(NULL, "ONE MOMENT", g->shown, 0.5f, "webMAN's PS2 list, folder SDCARD");
+				wm_shortcut_one(g, act == DO_WM_ADD, m, sizeof m);
+				ui_say(m);
+			}
 			last = buttons();
 		}
 		else if (act == DO_DELETE_ASK || act == DO_DELETE || act == DO_COPYGAME || act == DO_SC_ADD || act == DO_SC_DEL)

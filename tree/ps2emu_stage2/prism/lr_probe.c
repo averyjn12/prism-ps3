@@ -7,12 +7,32 @@
 #define MAX_PORTS	8
 
 #if defined(PS2HWEMU)
-/* ps2_emu: three code words of the binary this build was made for. Its USB pages sit at fixed
- * EAs (HW_EA_*), so there is no table of addresses to compare; lr_usb_mapped() is the gate. */
+/* ps2_emu: kit 1.1 (2026-11-24) checks EVERY place this build relies on, so it can run on any
+ * firmware whose ps2_emu is code-identical to 4.93's (the .self may be packed differently): the
+ * TOC slot (low word of the u64) through which ps2_emu reaches each global the build reads or
+ * writes, and the code words the static map was read from (re_notes/ps2_emu_ehci_coop_2026-11-23.md).
+ * Values read from re/work/ps2_emu.elf (4.93) by toc_slots.py. Any difference: the whole build
+ * stays off (lr_init logs which word). Plain numbers, not pointers: nothing here is relocated. */
+static const u32 sig_at[] = {
+	0x4E481C, 0x4E487C, 0x4E4C4C, 0x4E4C6C, 0x4E4DAC, 0x4E4D8C, 0x4E4D94, 0x4E4E04, 0x4E4D5C, 0x4E4D2C, 0x4E54E4,
+	GX_SIG1_ADDR, GX_SIG2_ADDR, HW_SIG3_ADDR, 0x03AFE0, 0x03AFA0, 0x03B530, 0x03CA50, 0x03CA60, 0x0383F4, 0x03C890,
+};
+static const u32 sig_is[] = {
+	0x505BD0, 0x505BC8, 0x506118, 0x506068, 0x506110, 0x5060A8, 0x5060A0, 0x506090, 0x506168, 0x506129, 0x508000,
+	GX_SIG1_WORD, GX_SIG2_WORD, HW_SIG3_WORD, 0xFBFD0000, 0x810A0044, 0x80070000, 0xF8640000, 0xF98A0000, 0xF821FF71, 0xFBA40000,
+};
+
 int lr_sig_check(void)
 {
-	return *(u32 *)(u64)GX_SIG1_ADDR == GX_SIG1_WORD && *(u32 *)(u64)GX_SIG2_ADDR == GX_SIG2_WORD &&
-		*(u32 *)(u64)HW_SIG3_ADDR == HW_SIG3_WORD;
+	unsigned i;
+
+	for (i = 0; i < sizeof sig_at / sizeof sig_at[0]; i++)
+		if (*(volatile u32 *)(u64)sig_at[i] != sig_is[i])
+		{
+			lr_log("sig: %x is %08x, 4.93 has %08x\n", sig_at[i], *(volatile u32 *)(u64)sig_at[i], sig_is[i]);
+			return 0;
+		}
+	return 1;
 }
 
 /* The four pages are mapped by one routine (0x01D2E0) before the EHCI init, which reads

@@ -25,6 +25,7 @@ typedef struct
 				   5 a disc shortcut whose disc is not in the drive */
 	u8 where;		/* 0 /dev_sd, 1 the card read raw (PS2), 2 /dev_hdd0, 3..10 /dev_usb000..007, 11 the drive, 12 /dev_ms, 13 /dev_cf */
 	u8 shortcut;		/* kept in shortcuts.txt (manage.c) */
+	u8 slot;		/* v0.66: a PS2 game on a card (where 1): its slot, 0 Memory Stick, 1 SD, 2 CompactFlash */
 	char id[12];		/* title ID from the image (SYSTEM.CNF), or empty */
 	char shown[100];	/* what the screen shows: the art file's title, else the name without extension */
 	u8 letter;		/* 0 = '#', 1..26 = A..Z */
@@ -36,14 +37,20 @@ typedef struct
 extern game_t games[N_PLAT][MAX_GAMES];
 extern int n_games[N_PLAT];
 extern int card_state;		/* 0 = card read; else why not (LR_E_*) */
+extern u64 card_dev;		/* v0.63: the storage device (slot) the card was found in: ST_DEV_MS / SD / CF */
 
 void games_scan(void);
 const char *where_name(int where);	/* "SD", "HDD", "USB 0" ... */
+const char *game_where_name(const game_t *g);	/* v0.66: the same, with a card PS2 game's own slot */
 
 /* art.c: /dev_hdd0/tmp/prism_art.dat (bench/lr_art.py): covers and proper titles by title ID */
 int  art_load(void);
 int  art_load_from(const char *path);
 const tex_t *art_find(const char *id, const char **title);
+const u8 *art_bytes(long *len);		/* v0.57: the file as loaded (covers.c rebuilds it) */
+int  art_refused(const char *id);	/* v0.58: the player removed this game's cover (Square menu) */
+/* v0.58: a PS3 / PSP game's own ICON0.PNG (games.c); buf NULL: is it there (0) */
+int  game_icon0(const char *path, int plat, u8 *buf, u32 cap);
 
 /* one UTF-8 key of a PARAM.SFO image (games.c) */
 int sfo_get(const u8 *d, int n, const char *key, char *out, int out_n);

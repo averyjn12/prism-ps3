@@ -1,0 +1,19 @@
+# Where Prism's "Game covers" page looks for covers, in this order (SETTINGS, Game covers).
+# One source a line:   name | platforms | where
+#   platforms: 1 = PS1, 2 = PS2, 3 = PS3, 4 = PSP (12 = PS1 and PS2 ...)
+#   where:     https://host/path, or /a/path on this PS3, or game:<what> for a picture of the game's own:
+#              game:BESIDE  a picture next to the game named like it (webMAN's way: Game.iso -> Game.png / .jpg)
+#              game:ICON0.PNG  the icon inside the game itself (its folder or plain .iso)
+#              {ID} is the game's serial as the game writes it (SLUS_212.43, BLUS30386), {DASH} the same in
+#              the form SLUS-21243 / BLUS-30386. Plain http:// is not accepted.
+# Only the serial goes into a request. Prism ships no covers: these are public collections.
+# A /path source is shown only when its folder is on this PS3 (a cover pack installs it).
+# A wide picture (an icon) keeps its shape on a darkened background; a box cover fills the square.
+A picture beside the game, named like it | 1234 | game:BESIDE
+Cover pack installed on this PS3 (PS1, PS2) | 12 | /dev_hdd0/game/BLES80608/USRDIR/covers_retro/psx/{ID}_COV.JPG
+Cover pack installed on this PS3 (PS3) | 3 | /dev_hdd0/game/BLES80608/USRDIR/covers/{ID}.JPG
+PS2 covers (xlenore, the set PCSX2 uses) | 2 | https://raw.githubusercontent.com/xlenore/ps2-covers/main/covers/default/{DASH}.jpg
+PS1 covers (xlenore, the set DuckStation uses) | 1 | https://raw.githubusercontent.com/xlenore/psx-covers/main/covers/default/{DASH}.jpg
+PSBBN art database (PS2) | 2 | https://raw.githubusercontent.com/CosmicScale/psbbn-art-database/main/art/{ID}.png
+PS3 covers (aldostools, the set webMAN uses) | 3 | https://raw.githubusercontent.com/aldostools/resources/master/COV/{ID}.JPG
+The game's own icon (PS3, PSP) | 34 | game:ICON0.PNG

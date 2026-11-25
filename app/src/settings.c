@@ -9,11 +9,17 @@
 #include "check.h"
 #include "setup.h"
 #include "help.h"
+#include "covers.h"
+#include "launch.h"
 #include "version.h"
 
 /* v0.36: "Start Prism with the console" removed (Bananafuzzbuddy, 11-23: no better start-up method exists) */
 /* v0.46: Help first (the row the screen opens on) */
-enum { ACT_HELP, ACT_SETUP, ACT_RECHECK, ACT_PROBE, ACT_WMFIX, N_ACT };
+/* v0.55: the card's PS2 games in webMAN's list, right under the setup it needs; v0.57: Game covers */
+/* v0.61: the PSP launcher games start with (launch.c psp_launcher_*) */
+enum { ACT_HELP, ACT_SETUP, ACT_WMSC, ACT_COVERS, ACT_PSPL, ACT_RECHECK, ACT_PROBE, ACT_WMFIX, N_ACT };
+
+static int st_covers;	/* v0.57: the Game covers page is up (covers.c) */
 
 /* v0.49: the last row is there only while webMAN's Auto-Play is on */
 static int n_act(void)
@@ -36,6 +42,7 @@ void settings_open(void)
 	st_sel = 0;
 	st_ask = 0;
 	st_help = 0;
+	st_covers = 0;
 	st_auto = autostart_on();
 	dev_space_scan();
 }
@@ -141,6 +148,11 @@ void settings_draw(void)
 		help_draw();
 		return;
 	}
+	if (st_covers)
+	{
+		covers_draw();
+		return;
+	}
 	top_bar("SETTINGS");
 	top_right("PRISM ", DIM, APP_VERSION, FAINT);
 
@@ -163,19 +175,40 @@ void settings_draw(void)
 		st_sel = n_act() - 1;
 	for (i = 0; i < n_act(); i++)
 	{
+		const int pl = psp_launcher_for(NULL);
 		const char *s = i == ACT_HELP ? "Help" : i == ACT_PROBE ? "Write a probe log" : i == ACT_RECHECK ? "Check the console again"
-			: i == ACT_WMFIX ? "Turn webMAN's Auto-Play off"
+			: i == ACT_WMFIX ? "Turn webMAN's Auto-Play off" : i == ACT_WMSC ? "Put PS2 games in webMAN's list"
+			: i == ACT_COVERS ? "Game covers"
+			: i == ACT_PSPL ? (pl == PSPL_REMASTER ? "PSP games start with: Remaster launcher" : pl ? "PSP games start with: Minis launcher"
+				: "PSP games: no PSP launcher installed")
 			: (su.state == SU_APP ? "Remove the PS2 setup" : "Set up PS2 play");
-		int on = i == st_sel, usable = i != ACT_SETUP || (su.state == SU_APP || (chk.ps2_ok && su.state != SU_CONFLICT && su.shipped));
-		const int five = n_act() == 5, pitch = five ? 21 : 25;
+		int on = i == st_sel, usable = (i != ACT_SETUP || (su.state == SU_APP || (chk.ps2_ok && su.state != SU_CONFLICT && su.shipped)))
+			&& (i != ACT_WMSC || su.state == SU_APP || su.state == SU_BENCH)
+			&& (i != ACT_PSPL || psp_launchers_installed() == (PSPL_MINIS_ | PSPL_REMASTER));
+		/* v0.62 (Bananafuzzbuddy 11-24: the bar no longer lined up): every row is a slot of the same height, sized from
+		 * the font's own height and the room between the PS2 lines and the note line; the bar IS the slot and
+		 * the text sits in its middle, so the two cannot drift apart however many rows there are. Seven rows
+		 * or more use the small font, and a row too wide for the column is cut to fit */
+		/* the list starts under the PS2 lines: one line of detail (228) or two (245) */
+		const int rows = n_act(), f = rows >= 7 ? F_SMALL : F_BODY, th = font_h(f);
+		const int top = text_w(F_SMALL, det, 0) <= 290 ? 252 : 266, room = 374 - top;
+		int pitch = room / rows, ty;
+		char cut[120];
 
-		y = (five ? 270 : 274) + i * pitch;
+		if (pitch > th + 12)
+			pitch = th + 12;
+		y = top + i * pitch;
+		ty = y + (pitch - th) / 2;	/* the text's top, in the middle of its slot */
 		if (on)
 		{
-			rect(LEFT, (float)y - 3.0f, 330.0f, (float)y + (five ? 18.0f : 20.0f), RGBA(0x7F, 0xE3, 0xFF, 0x1C));
-			frame_rect(LEFT, (float)y - 3.0f, 330.0f, (float)y + (five ? 18.0f : 20.0f), 1.0f, GLOW);
+			/* the bar wraps the text: 3 above, 2 below, never past the slot */
+			float b0 = (float)(ty - 3 > y ? ty - 3 : y), b1 = (float)(ty + th + 2 < y + pitch ? ty + th + 2 : y + pitch);
+
+			rect(LEFT, b0, 330.0f, b1, RGBA(0x7F, 0xE3, 0xFF, 0x1C));
+			frame_rect(LEFT, b0, 330.0f, b1, 1.0f, GLOW);
 		}
-		text(F_BODY, LEFT + 12, y, usable ? (on ? INK : DIM) : FAINT, s);
+		fit(cut, sizeof cut, f, s, 330 - LEFT - 20);
+		text(f, LEFT + 12, ty, usable ? (on ? INK : DIM) : FAINT, cut);
 	}
 
 	x = 360;
@@ -269,6 +302,17 @@ int settings_pad(unsigned pressed)
 			st_help = 0;
 		return DO_NOTHING;
 	}
+	if (st_covers)
+	{
+		int r = covers_pad(pressed);
+
+		if (r < 0)
+		{
+			st_covers = 0;
+			return DO_NOTHING;
+		}
+		return r;
+	}
 	if (pressed & PAD_CIRCLE)
 		return -1;
 	if (pressed & PAD_UP)
@@ -289,6 +333,34 @@ int settings_pad(unsigned pressed)
 			return DO_PROBE;
 		if (st_sel == ACT_RECHECK)
 			return DO_RECHECK;
+		if (st_sel == ACT_PSPL)
+		{
+			/* v0.61: flips the default between the two launchers; a game's own choice (Square) stays */
+			int have = psp_launchers_installed(), now = psp_launcher_for(NULL), next = now == PSPL_REMASTER ? PSPL_MINIS_ : PSPL_REMASTER;
+
+			if (have != (PSPL_MINIS_ | PSPL_REMASTER))
+				ui_say(!have ? "No PSP launcher is installed: webMAN's setup can install them."
+					: have == PSPL_MINIS_ ? "Only the Minis launcher (PSPM66820) is installed." : "Only the Remaster launcher (PSPC66820) is installed.");
+			else if (psp_launcher_set(NULL, next) == 0)
+				ui_say(next == PSPL_REMASTER ? "PSP games start with the Remaster launcher (PSPC66820), unless a game has its own choice."
+					: "PSP games start with the Minis launcher (PSPM66820), unless a game has its own choice.");
+			else
+				ui_say("Could not save the setting.");
+			return DO_NOTHING;
+		}
+		if (st_sel == ACT_COVERS)
+		{
+			st_covers = 1;
+			covers_open();
+			return DO_NOTHING;
+		}
+		if (st_sel == ACT_WMSC)
+		{
+			if (su.state == SU_APP || su.state == SU_BENCH)
+				return DO_WMSC;
+			ui_say("Set up PS2 play first (the row above).");
+			return DO_NOTHING;
+		}
 		if (su.state == SU_APP || (chk.ps2_ok && su.state != SU_CONFLICT && su.shipped))
 		{
 			st_ask = 1;

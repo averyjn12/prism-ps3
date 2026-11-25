@@ -37,13 +37,17 @@
 #include "webman.h"
 
 #define APP_SETUP	"/dev_hdd0/game/PRSM00001/USRDIR/setup"
-#define SRC_STAGE2	APP_SETUP "/prism_stage2.bin"
+/* v0.54: on a CECHA / CECHB (chk.a01) the A01 helper (lr/out/lr_hw5k11.bin, built for ps2_emu) is
+ * installed under its own name and loaded through ps2_emu's stage2 slot; the E01 lines are as before */
+#define SRC_STAGE2	(chk.a01 ? APP_SETUP "/prism_stage2_a01.bin" : APP_SETUP "/prism_stage2.bin")
 #define SRC_CARRIER	APP_SETUP "/carrier.iso"
 #define SRC_COVER	APP_SETUP "/carrier.png"
 #define SRC_TT		APP_SETUP "/tinytees.iso"
 #define DST_TT		"/dev_hdd0/PS2ISO/Tiny Tees.iso"
 #define TT_DONE		"/dev_hdd0/game/PRSM00001/USRDIR/tinytees.done"
-#define DST_STAGE2	"/dev_hdd0/tmp/prism_stage2.bin"
+#define DST_STAGE2	(chk.a01 ? "/dev_hdd0/tmp/prism_stage2_a01.bin" : "/dev_hdd0/tmp/prism_stage2.bin")
+#define A01_LOG		"/dev_hdd0/tmp/prism_a01.log"	/* the A01 helper's log (lr.h): written only if it exists */
+#define A01_KIT_HELPER	"prism_a01_stage2.bin"		/* the Prism A01 Test kit's own map target */
 #define PS2ISO_DIR	"/dev_hdd0/PS2ISO"
 #define DST_CARRIER	PS2ISO_DIR "/Prism Launcher.iso"
 #define DST_COVER	PS2ISO_DIR "/Prism Launcher.png"
@@ -52,22 +56,36 @@
 #define BACKUP		"/dev_hdd0/tmp/prism_onxmb_backup.bat"
 #define PENDING		"/dev_hdd0/tmp/prism_setup_pending"
 #define REMOVED		"/dev_hdd0/tmp/prism_setup_removed"
-#define MAP_LINE	"map /dev_flash/ps2emu/ps2gxemu_stage2.bin="
+#define MAP_LINE	(chk.a01 ? "map /dev_flash/ps2emu/ps2hwemu_stage2.bin=" : "map /dev_flash/ps2emu/ps2gxemu_stage2.bin=")
 #define MARK_BEGIN	"# PRISM-APP-SETUP begin"
 #define MARK_END	"# PRISM-APP-SETUP end"
 #define NO_FILE_NOTE	"# (there was no onxmb.bat before Prism's setup)\n"
 #define BAT_MAX		(60 * 1024)
+#define BLOCK_MAX	1024
 
-static const char block[] =
-	MARK_BEGIN ": the Prism app (PRSM00001) wrote these lines; its SETTINGS page takes them out.\n"
-	"# They load Prism's PS2 helper for PS2 games from the SD card. Nothing is written to flash.\n"
-	"if exist " DST_STAGE2 "\n"
-	MAP_LINE DST_STAGE2 "\n"
-	"del " PENDING "\n"
-	"end if\n"
-	MARK_END "\n";
+/* v0.54: made at run time (the paths depend on the model); on a CECHC / CECHE the text is the same,
+ * byte for byte, as the v0.15 - v0.53 constant */
+static const char *block_text(void)
+{
+	static char b[BLOCK_MAX];
+
+	snprintf(b, sizeof b, "%s: the Prism app (PRSM00001) wrote these lines; its SETTINGS page takes them out.\n"
+		"# They load Prism's PS2 helper for PS2 games from the SD card. Nothing is written to flash.\n"
+		"if exist %s\n%s%s\ndel %s\nend if\n%s\n", MARK_BEGIN, DST_STAGE2, MAP_LINE, DST_STAGE2, PENDING, MARK_END);
+	return b;
+}
+
+static const char *map_full(void)	/* MAP_LINE DST_STAGE2 */
+{
+	static char b[160];
+
+	snprintf(b, sizeof b, "%s%s", MAP_LINE, DST_STAGE2);
+	return b;
+}
 
 setup_t su;
+
+static void wm_shortcuts_remove(void);	/* v0.55, below */
 
 /* ---- files ---- */
 
@@ -512,19 +530,22 @@ static void classify(void)
 {
 	char *p = bat;
 
+	const char *ml = MAP_LINE, *ds = DST_STAGE2;
+	size_t mll = strlen(ml), dsl = strlen(ds);
+
 	su.state = SU_NONE;
 	su.line[0] = 0;
-	if (strstr(bat, MARK_BEGIN) && strstr(bat, MARK_END) && strstr(bat, MAP_LINE DST_STAGE2))
+	if (strstr(bat, MARK_BEGIN) && strstr(bat, MARK_END) && strstr(bat, map_full()))
 		su.state = SU_APP;
 	/* a map line outside our block: the bench's script (same file), or someone else's */
-	while ((p = strstr(p, MAP_LINE)) != NULL)
+	while ((p = strstr(p, ml)) != NULL)
 	{
 		char *b = strstr(bat, MARK_BEGIN), *e = strstr(bat, MARK_END), *eol;
 		int len;
 
 		if (b && e && p > b && p < e)
 		{
-			p += sizeof MAP_LINE - 1;
+			p += mll;
 			continue;
 		}
 		eol = p;
@@ -532,9 +553,9 @@ static void classify(void)
 			eol++;
 		len = (int)(eol - p);
 		snprintf(su.line, sizeof su.line, "%.*s", len, p);
-		if (!strncmp(p + sizeof MAP_LINE - 1, DST_STAGE2, sizeof DST_STAGE2 - 1) && su.state != SU_APP)
+		if (!strncmp(p + mll, ds, dsl) && su.state != SU_APP)
 			su.state = SU_BENCH;
-		else if (strncmp(p + sizeof MAP_LINE - 1, DST_STAGE2, sizeof DST_STAGE2 - 1))
+		else if (strncmp(p + mll, ds, dsl))
 		{
 			su.state = SU_CONFLICT;
 			return;
@@ -577,6 +598,8 @@ int ps2_ready(char *why, int n)
 {
 	if (!chk.ps2_ok)
 		snprintf(why, n, "PS2 games from the card do not work on this console: %s", chk.why);
+	else if (su.state == SU_CONFLICT && strstr(su.line, A01_KIT_HELPER))
+		snprintf(why, n, "the Prism A01 Test kit is still set up: open it, use its Remove step, restart the console, then Prism's SETTINGS");
 	else if (su.state == SU_CONFLICT)
 		snprintf(why, n, "another tool loads its own PS2 stage2 (onxmb.bat: %s)", su.line);
 	else if (su.state == SU_NONE)
@@ -607,15 +630,28 @@ int setup_install(char *msg, int n)
 	}
 	if (su.state == SU_CONFLICT)
 	{
-		snprintf(msg, n, "Not set up: onxmb.bat already loads another PS2 stage2 (%s).", su.line);
+		if (strstr(su.line, A01_KIT_HELPER))
+			snprintf(msg, n, "Not set up: the Prism A01 Test kit is still set up. Open it, use its Remove step, restart the console, then set up here.");
+		else
+			snprintf(msg, n, "Not set up: onxmb.bat already loads another PS2 stage2 (%s).", su.line);
 		return -3;
+	}
+	/* v0.54: the A01 helper logs to its own file, and only if the file is there (lr.h) */
+	if (chk.a01 && !exists(A01_LOG))
+	{
+		static u8 z[0x10000];
+
+		write_all(A01_LOG, z, sizeof z);
 	}
 	if (su.stage2 != 1)
 	{
 		if (su.stage2 == 0)
 		{
-			sysFsUnlink(DST_STAGE2 ".old");
-			sysLv2FsRename(DST_STAGE2, DST_STAGE2 ".old");
+			char old[80];
+
+			snprintf(old, sizeof old, "%s.old", DST_STAGE2);
+			sysFsUnlink(old);
+			sysLv2FsRename(DST_STAGE2, old);
 		}
 		r = copy_verify(SRC_STAGE2, DST_STAGE2);
 		if (r)
@@ -646,10 +682,11 @@ int setup_install(char *msg, int n)
 	}
 	if (su.state == SU_NONE)
 	{
-		static char text[BAT_MAX + sizeof block + 4];
+		static char text[BAT_MAX + BLOCK_MAX + 4];
+		const char *block = block_text();
 		int len = bat_read();
 
-		if (len + (int)sizeof block + 2 > BAT_MAX)
+		if (len + (int)strlen(block) + 3 > BAT_MAX)
 		{
 			snprintf(msg, n, "Not set up: onxmb.bat is too big to add to.");
 			return -6;
@@ -713,6 +750,7 @@ int setup_remove(char *msg, int n)
 		}
 	}
 	sysFsUnlink(PENDING);
+	wm_shortcuts_remove();	/* v0.55: without the helper they would only start the fallback */
 	if (same_file(SRC_CARRIER, DST_CARRIER) == 1)
 		sysFsUnlink(DST_CARRIER);
 	if (exists(SRC_COVER) && same_file(SRC_COVER, DST_COVER) == 1)
@@ -722,6 +760,224 @@ int setup_remove(char *msg, int n)
 	setup_read();
 	snprintf(msg, n, "Removed. PS2 games use the normal stage2 again after the console restarts.");
 	return 0;
+}
+
+/* ---- v0.55: the card's PS2 games in webMAN's own list (Bananafuzzbuddy, 2026-11-24) ----
+ * One shortcut per PS2 game on the card: a copy of a small template image under the game's own file
+ * name in /dev_hdd0/PS2ISO/SDCARD, where webMAN lists it like any PS2 title (and never offers to copy
+ * anything: the real game stays on the card). Its marker (PRISMLR1 / mode=iso / path=*) makes the
+ * helper play the card file of that name, from /PS2ISO or /PS2PRISM on any partition, whole or split
+ * (lr_card.c path_from_title, lr_fs.c lr_fs_open). The same mechanism as the launcher's pins (run S1,
+ * Amendment F); the templates are bench/lr_title.py build_template's (app_a01/tools/mk_templates.py).
+ * The names made are kept in WMSC_LIST; only those, and only while they carry the marker, are ever
+ * deleted (setup_remove, and a game no longer on the card). */
+#include "games.h"
+#include "cardcheck.h"	/* v0.66: card_lun_for */
+#define WMSC_DIR	PS2ISO_DIR "/SDCARD"		/* lr.h LR_PIN_DIR */
+#define WMSC_LIST	"/dev_hdd0/game/PRSM00001/USRDIR/wm_shortcuts.txt"
+#define WMSC_TPL_DVD	APP_SETUP "/tpl_dvd.iso"
+#define WMSC_TPL_CD	APP_SETUP "/tpl_cd.iso"
+#define WMSC_MARK_OFF	0x7800
+
+static int wmsc_is_ours(const char *path)
+{
+	char m[8];
+	s32 fd;
+	u64 pos = 0, got = 0;
+
+	if (sysFsOpen(path, SYS_O_RDONLY, &fd, NULL, 0) != 0)
+		return 0;
+	if (sysFsLseek(fd, WMSC_MARK_OFF, 0, &pos) != 0 || sysFsRead(fd, m, 8, &got) != 0)
+		got = 0;
+	sysFsClose(fd);
+	return got == 8 && !memcmp(m, "PRISMLR1", 8);
+}
+
+static const char *leaf_of(const char *p)
+{
+	const char *s = strrchr(p, '/');
+
+	return s ? s + 1 : p;
+}
+
+/* v0.66: the shortcut of a game on a card behind another card (cardcheck.h card_lun_for) carries "lun=N" in its marker,
+ * in the newline padding right after "path=*" (the helper reads the marker with the same parser as its trigger file,
+ * lr_card.c cfg_read). lun < 0 puts the padding back. Only a marker in exactly the template's shape is touched. */
+#define WMSC_HEAD	"PRISMLR1\nmode=iso\npath=*\n"
+static int wmsc_set_lun(const char *path, int lun)
+{
+	char m[32], want[6];
+	const int at = (int)sizeof(WMSC_HEAD) - 1;
+	s32 fd;
+	u64 pos = 0, got = 0;
+	int i, r = -1;
+
+	memcpy(want, "\n\n\n\n\n\n", 6);
+	if (lun >= 0 && lun <= 7)
+		memcpy(want, "lun=", 4), want[4] = (char)('0' + lun);
+	if (sysFsOpen(path, SYS_O_RDWR, &fd, NULL, 0) != 0)
+		return -1;
+	if (sysFsLseek(fd, WMSC_MARK_OFF, 0, &pos) == 0 && sysFsRead(fd, m, sizeof m, &got) == 0 && got == sizeof m
+		&& !memcmp(m, WMSC_HEAD, at))
+	{
+		int pad = 1, old = !memcmp(m + at, "lun=", 4) && m[at + 4] >= '0' && m[at + 4] <= '7' && m[at + 5] == '\n';
+
+		for (i = 0; i < 6; i++)
+			pad &= m[at + i] == '\n';
+		if (!memcmp(m + at, want, 6))
+			r = 0;
+		else if ((pad || old) && sysFsLseek(fd, WMSC_MARK_OFF + at, 0, &pos) == 0 && sysFsWrite(fd, want, 6, &got) == 0 && got == 6)
+			r = 0;
+	}
+	sysFsClose(fd);
+	return r;
+}
+
+int wm_shortcuts_add(char *msg, int n)
+{
+	static char list[16384];
+	char dst[260], resp[200];
+	int i, made = 0, had = 0, skipped = 0, len;
+	FILE *f;
+
+	setup_read();
+	if (su.state != SU_APP && su.state != SU_BENCH)
+	{
+		snprintf(msg, n, "Set up PS2 play first (the row above).");
+		return -1;
+	}
+	if (!exists(WMSC_TPL_DVD) || !exists(WMSC_TPL_CD))
+	{
+		snprintf(msg, n, "This Prism is missing its shortcut templates: reinstall the .pkg.");
+		return -2;
+	}
+	sysFsMkdir(PS2ISO_DIR, 0777);
+	sysFsMkdir(WMSC_DIR, 0777);
+	len = read_all(WMSC_LIST, list, sizeof list - 1);
+	list[len < 0 ? 0 : len] = 0;
+	f = fopen(WMSC_LIST, "a");
+	for (i = 0; i < n_games[P_PS2]; i++)
+	{
+		const game_t *g = &games[P_PS2][i];
+		const char *nm = leaf_of(g->path);
+
+		if (g->where != 1 || !*nm || strlen(nm) > 200)	/* the card, read raw: Prism's own card reader */
+			continue;
+		snprintf(dst, sizeof dst, WMSC_DIR "/%s", nm);
+		if (exists(dst))
+		{
+			if (wmsc_is_ours(dst))
+			{
+				had++;
+				wmsc_set_lun(dst, card_lun_for(g->slot));	/* v0.66: the cards may sit in other slots now */
+			}
+			else
+				skipped++;	/* someone else's file of that name: left alone */
+			continue;
+		}
+		if (copy_verify(g->kind ? WMSC_TPL_CD : WMSC_TPL_DVD, dst) != 0 || wmsc_set_lun(dst, card_lun_for(g->slot)) != 0)
+		{
+			sysFsUnlink(dst);
+			skipped++;
+			continue;
+		}
+		made++;
+		if (f)
+			fprintf(f, "%s\n", nm);
+	}
+	if (f)
+		fclose(f);
+	if (!made && !had)
+	{
+		snprintf(msg, n, n_games[P_PS2] ? "No shortcuts made: no PS2 game on the SD card could get one." : "No PS2 games on the SD card.");
+		return -3;
+	}
+	wm_get("/refresh.ps3", resp, sizeof resp);	/* webMAN re-reads its game lists */
+	snprintf(msg, n, "%d new in webMAN's PS2 list, folder SDCARD (%d already there%s). Start them like any PS2 game, card in.",
+		made, had, skipped ? ", some skipped" : "");
+	return 0;
+}
+
+/* v0.56: one game at a time, from its Square menu (Bananafuzzbuddy, 11-24: looked for it there) */
+int wm_shortcut_has(const void *gv)
+{
+	const game_t *g = (const game_t *)gv;
+	char p[260];
+	const char *nm = leaf_of(g->path);
+
+	snprintf(p, sizeof p, WMSC_DIR "/%s", nm);
+	return exists(p) && wmsc_is_ours(p);
+}
+
+int wm_shortcut_one(const void *gv, int add, char *msg, int n)
+{
+	const game_t *g = (const game_t *)gv;
+	char dst[260], resp[200];
+	const char *nm = leaf_of(g->path);
+	FILE *f;
+
+	snprintf(dst, sizeof dst, WMSC_DIR "/%s", nm);
+	if (!add)
+	{
+		if (wmsc_is_ours(dst))
+			sysFsUnlink(dst);
+		wm_get("/refresh.ps3", resp, sizeof resp);
+		snprintf(msg, n, "%s is out of webMAN's list", g->shown);
+		return 0;
+	}
+	setup_read();
+	if (su.state != SU_APP && su.state != SU_BENCH)
+	{
+		snprintf(msg, n, "Set up PS2 play first: SETTINGS, \"Set up PS2 play\"");
+		return -1;
+	}
+	if (!exists(WMSC_TPL_DVD) || !exists(WMSC_TPL_CD))
+	{
+		snprintf(msg, n, "This Prism is missing its shortcut templates: reinstall the .pkg");
+		return -2;
+	}
+	if (exists(dst))
+	{
+		snprintf(msg, n, wmsc_is_ours(dst) ? "%s is already in webMAN's list" : "webMAN's SDCARD folder already has another file called that", g->shown);
+		return 0;
+	}
+	sysFsMkdir(PS2ISO_DIR, 0777);
+	sysFsMkdir(WMSC_DIR, 0777);
+	if (copy_verify(g->kind ? WMSC_TPL_CD : WMSC_TPL_DVD, dst) != 0 || wmsc_set_lun(dst, g->where == 1 ? card_lun_for(g->slot) : -1) != 0)
+	{
+		sysFsUnlink(dst);
+		snprintf(msg, n, "Could not write the shortcut to the hard disk");
+		return -3;
+	}
+	f = fopen(WMSC_LIST, "a");
+	if (f)
+	{
+		fprintf(f, "%s\n", nm);
+		fclose(f);
+	}
+	wm_get("/refresh.ps3", resp, sizeof resp);
+	snprintf(msg, n, "%s is in webMAN's PS2 list now, folder SDCARD. Start it there with the card in.", g->shown);
+	return 0;
+}
+
+static void wm_shortcuts_remove(void)
+{
+	static char list[16384];
+	char path[260], resp[200], *p;
+	int len = read_all(WMSC_LIST, list, sizeof list - 1);
+
+	if (len <= 0)
+		return;
+	list[len] = 0;
+	for (p = strtok(list, "\n"); p; p = strtok(NULL, "\n"))
+	{
+		snprintf(path, sizeof path, WMSC_DIR "/%s", p);
+		if (wmsc_is_ours(path))
+			sysFsUnlink(path);
+	}
+	sysFsUnlink(WMSC_LIST);
+	sysFsRmdir(WMSC_DIR);	/* only if empty: the launcher's own pins may live there too */
+	wm_get("/refresh.ps3", resp, sizeof resp);
 }
 
 /* v0.16: every Prism comes with Tiny Tees (Bananafuzzbuddy's PS2 homebrew, the test disc this project was
@@ -775,4 +1031,24 @@ uint64_t wall_s(void)
 	if (sysFsStat("/dev_hdd0/tmp/prism_clock", &st) == 0)
 		return (uint64_t)st.st_mtime;
 	return now_s();
+}
+
+/* v0.59: Tiny Tees' cover (Bananafuzzbuddy 11-24: so that people are less likely to delete it), original art in the
+ * game's own look (tools/mk_tinytees_cover.py). While Tiny Tees is on the hard disk: a "Tiny Tees.png" next
+ * to it, which webMAN shows on the XMB (never over a picture already there), and its cover in Prism's art
+ * file (covers_builtin: never over a cover already there, never back after the player removed it).
+ * TT_SERIAL is the serial the shipped disc's SYSTEM.CNF names: build_app.sh refuses a package where it is not. */
+#include "covers.h"
+#define TT_SERIAL	"SLUS_999.01"
+#define SRC_TT_PNG	APP_SETUP "/tinytees_cover.png"
+#define SRC_TT_RGBA	APP_SETUP "/tinytees_cover.rgba"
+#define DST_TT_PNG	"/dev_hdd0/PS2ISO/Tiny Tees.png"
+
+int tinytees_cover(void)
+{
+	if (!exists(DST_TT))
+		return 0;
+	if (!exists(DST_TT_PNG) && exists(SRC_TT_PNG) && copy_verify(SRC_TT_PNG, DST_TT_PNG) != 0)
+		sysFsUnlink(DST_TT_PNG);
+	return covers_builtin(TT_SERIAL, 2, "Tiny Tees", SRC_TT_RGBA);
 }

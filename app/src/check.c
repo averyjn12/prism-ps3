@@ -19,10 +19,13 @@
 #include "sha256.h"
 #include "webman.h"
 
-#define EMU_FILE	"/dev_flash/ps2emu/ps2_gxemu.self"
-#define EMU_SIZE	1981120ULL
-#define EMU_SHA		"c0ec64b97590d3075e7a9a58265919c21ded72e7b7cf861278096defa76e8af9"	/* CECHE01, 4.93 CEX, 2026-11-22 */
-#define FLASH_STAGE2	"/dev_flash/ps2emu/ps2gxemu_stage2.bin"
+#define EMU_FILE	(chk.a01 ? "/dev_flash/ps2emu/ps2_emu.self" : "/dev_flash/ps2emu/ps2_gxemu.self")
+#define EMU_SIZE	(chk.a01 ? 1770208ULL : 1981120ULL)
+/* CECHE01 4.93 CEX 2026-11-22; v0.54: ps2_emu 4.93 read 2026-11-24 (the A01 helper also checks 21
+ * places in the emulator itself on every start, lr_probe.c, so other firmwares are let through) */
+#define EMU_SHA		(chk.a01 ? "1d299edf52685772b8c6d7d6f878bd94d86c6a71824041f1224ee82faf815b8d" : \
+			 "c0ec64b97590d3075e7a9a58265919c21ded72e7b7cf861278096defa76e8af9")
+#define FLASH_STAGE2	(chk.a01 ? "/dev_flash/ps2emu/ps2hwemu_stage2.bin" : "/dev_flash/ps2emu/ps2gxemu_stage2.bin")
 #define VERSION_TXT	"/dev_flash/vsh/etc/version.txt"
 #define CHECK_LOG	"/dev_hdd0/tmp/prism_check.log"
 
@@ -246,6 +249,7 @@ void check_console(void)
 	if (chk.cobra && sc8(0x7777, 0x0081, (u64)(unsigned long)idps) == 0)		/* PS3MAPI GET_IDPS */
 		chk.model = (int)(idps[0] & 0xFF);	/* byte 7 of the 16 (big-endian): product sub-code */
 	idps[0] = idps[1] = 0;
+	chk.a01 = model_family(chk.model) == 1;	/* v0.54: before the emulator file is looked at */
 	chk.emu = emu_check(hex);
 	chk.flash_stage2 = sysFsStat(FLASH_STAGE2, &st) == 0;
 	body[0] = 0;
@@ -268,8 +272,7 @@ void check_console(void)
 	 * the player is told. The worst case is a PS2 game that does not start; nothing is in flash. */
 	else if (chk.cobra_bcd < 0x0830 || chk.cobra_bcd > 0x0850)
 		snprintf(chk.why, sizeof chk.why, "Cobra %x.%x is running; PS2 from the card needs Cobra 8.3, 8.4 or 8.5", chk.cobra_bcd >> 8, (chk.cobra_bcd >> 4) & 15);
-	else if (model_family(chk.model) == 1)
-		snprintf(chk.why, sizeof chk.why, "this console (%s) runs PS2 games on its own PS2 chips; not supported yet", model_text(chk.model));
+	/* v0.54: CECHA / CECHB are let through (the A01 helper, setup.c / launch.c), marked untested below */
 	else if (model_family(chk.model) == 3)
 		snprintf(chk.why, sizeof chk.why, "this console (%s) has no PS2 hardware", model_text(chk.model));
 	/* model unknown (family 0): not a refusal. On a console whose PS2 emulator is not ps2_gxemu,
@@ -286,7 +289,12 @@ void check_console(void)
 		snprintf(chk.why, sizeof chk.why, "webMAN MOD did not answer (it mounts the games)");
 	else
 		chk.ps2_ok = 1;
-	if (chk.ps2_ok && (chk.cobra_bcd != 0x0850 || chk.fw_num != 493 || chk.emu != 1))
+	if (chk.ps2_ok && chk.a01)
+	{
+		chk.untested = 1;
+		snprintf(chk.note, sizeof chk.note, "CECHA/CECHB support is new and has not run on a real CECHA yet. If the Prism launcher starts instead of your game, the card could not be used.");
+	}
+	else if (chk.ps2_ok && (chk.cobra_bcd != 0x0850 || chk.fw_num != 493 || chk.emu != 1))
 	{
 		chk.untested = 1;
 		snprintf(chk.note, sizeof chk.note, "Not tested on firmware %s with Cobra %x.%x: a PS2 game may not start. If the screen stays black, hold the power button.",
@@ -299,7 +307,8 @@ void check_console(void)
 	{
 		fprintf(f, "Prism console check\nfirmware %s\ncobra %d bcd %04x\nmodel sub-code %d = %s (family %d)\n", chk.fw, chk.cobra,
 			chk.cobra_bcd, chk.model, model_text(chk.model), model_family(chk.model));
-		fprintf(f, "ps2_gxemu.self %s sha256 %s\nflash stage2 %d\nwebMAN %d\nps2_ok %d %s\n", chk.emu > 0 ? "MATCHES" : chk.emu == 0 ? "DIFFERS" : "MISSING",
+		fprintf(f, "a01 %d\n%s %s sha256 %s\nflash stage2 %d\nwebMAN %d\nps2_ok %d %s\n", chk.a01, chk.a01 ? "ps2_emu.self" : "ps2_gxemu.self",
+			chk.emu > 0 ? "MATCHES" : chk.emu == 0 ? "DIFFERS" : "MISSING",
 			hex, chk.flash_stage2, chk.wm, chk.ps2_ok, chk.why);
 		fprintf(f, "webMAN request file %d (1 served, 0 not: Lite?), webMAN Auto-Play %d (1 on, 0 off, -1 unknown)\n", chk.wm_req, chk.wm_autoplay);
 		fclose(f);

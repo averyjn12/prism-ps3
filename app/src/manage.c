@@ -20,6 +20,7 @@
 #include "webman.h"
 #include "screens.h"
 #include "dirlist.h"
+#include "cardcheck.h"	/* v0.65 */
 
 int app_events(void);	/* main.c: the system's events; 1 = asked to quit */
 
@@ -411,6 +412,8 @@ int game_del_plan(int plat, const game_t *g, char *what, int n)
 
 	if (busy(g, what, n))
 		return -9;
+	if (slot_bad_msg(slot_of_game(g), "Not deleted", what, n))	/* v0.65: the system would write the slot's damage back */
+		return -8;
 	job_title = g->shown;
 	t_drawn = 0;
 	tick("FINDING ITS FILES", 0.2f, "", 1);
@@ -481,6 +484,8 @@ int game_delete(unsigned (*pad)(void), int plat, const game_t *g, char *msg, int
 
 	if (busy(g, msg, n))
 		return -9;
+	if (slot_bad_msg(slot_of_game(g), "Not deleted", msg, n))
+		return -8;
 	job_title = g->shown;
 	t_drawn = 0;
 	tick("FINDING ITS FILES", 0.2f, "", 1);

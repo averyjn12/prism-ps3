@@ -22,6 +22,11 @@ int  setup_install(char *msg, int n);	/* 0 = done; msg says what happened either
 int  setup_remove(char *msg, int n);
 int  ps2_ready(char *why, int n);	/* 1 = a PS2 start from the card can work right now */
 void tinytees_install(void);		/* once per install: Tiny Tees in /dev_hdd0/PS2ISO */
+int  tinytees_cover(void);		/* v0.59: every start, after art_load: its cover, if it has none */
+int  wm_shortcuts_add(char *msg, int n);	/* v0.55: the card's PS2 games in webMAN's list (SETTINGS) */
+/* v0.56: one card PS2 game (a game_t *) in / out of webMAN's list, from its Square menu */
+int  wm_shortcut_has(const void *g);
+int  wm_shortcut_one(const void *g, int add, char *msg, int n);
 /* v0.28: SETTINGS "Start Prism with the console" (a block in /dev_hdd0/autoexec.bat) */
 int  autostart_on(void);
 int  autostart_set(int on, char *msg, int n);

@@ -8,6 +8,7 @@ typedef struct
 	int cobra;		/* Cobra's syscall 8 answered */
 	unsigned cobra_bcd;	/* 0x0850 = Cobra 8.5 */
 	int model;		/* the console ID's product sub-code (board), -1 = not read */
+	int a01;		/* v0.54: a CECHA / CECHB (PS2 chips, ps2_emu): the A01 helper and its own files */
 	int emu;		/* 1 = the PS2 emulator file is the one our helper was built for, 0 = another, -1 = missing */
 	int wm;			/* webMAN MOD answered on 127.0.0.1:80 */
 	int wm_req;		/* v0.22: 1 = webMAN serves /dev_hdd0/tmp/wm_request (how Prism starts PS3 games), 0 = not (Lite edition), -1 = not checked */

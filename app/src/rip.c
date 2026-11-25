@@ -38,6 +38,7 @@
 #include "ripcore.h"
 #include "storage.h"
 #include "drive.h"
+#include "cardcheck.h"	/* v0.65 */
 
 #define BD		"/dev_bdvd"
 #define RIP_LOG		"/dev_hdd0/tmp/prism_rip.log"
@@ -468,6 +469,19 @@ static void scan_devs(void)
 			devs[i].free = 0;
 			exf_ok = 0;
 			exf_why[0] = 0;
+			/* v0.65: never written unless the card was read from a slot that passed the check (cardcheck.h) */
+			if (card_state || slot_bad(slot_of_dev(card_dev)))
+			{
+				logf_("exFAT part: not offered, %s", card_state == LR_E_BADSLOT ? "the card's slot gives damaged data" : "no card read");
+				continue;
+			}
+			{
+				/* v0.66: with cards in several slots, the first one read (games.c card_dev); say which */
+				static char exf_name[48];
+
+				snprintf(exf_name, sizeof exf_name, "%s card, exFAT part", slot_name(slot_of_dev(card_dev)));
+				devs[i].name = exf_name;
+			}
 			if (strcmp(dest_sub, "PS2ISO") || exc_open(&dv, exf_why, sizeof exf_why))
 				continue;
 			exf_ok = exw_begin(&dv, dest_sub, dest_name, total, exf_why, sizeof exf_why) == 0;
@@ -480,6 +494,12 @@ static void scan_devs(void)
 		}
 		devs[i].present = is_dir(devs[i].path);
 		devs[i].free = 0;
+		if (devs[i].present && slot_bad(slot_of_path(devs[i].path)))
+		{
+			/* v0.65: a write through a slot that gives damaged data would damage the card */
+			logf_("%s: not offered, the slot gives damaged data (%s)", devs[i].path, slot_cc_why[slot_of_path(devs[i].path)]);
+			devs[i].present = 0;
+		}
 		if (ps2_img && i > 1)
 			devs[i].present = 0;	/* USB drives and the other card slots: PS2 games do not start from them */
 		if (!devs[i].present)
@@ -1022,12 +1042,140 @@ static int where_dev(int where)
 	return -1;
 }
 
+/* ---- v0.56: a PS2 game on the SD card copied to the hard disk (Bananafuzzbuddy, 2026-11-24) ----
+ * The card's games are read through Prism's own card reader (lr_fs.c, the stage2's code), so a game
+ * on the exFAT part, in /PS2PRISM or split into .0/.1 parts arrives as ONE file in /dev_hdd0/PS2ISO,
+ * where webMAN and Prism both play it. Written as <name>.part and renamed when whole: a stopped or
+ * failed copy never shows up as a game. The card is only read. */
+static int copy_card_ps2(const game_t *g, char *msg, int msg_n)
+{
+	const char *base = strrchr(g->path, '/');
+	char dst[300], part[310];
+	u64 size = 0, off, last = 0, freeb = 0;
+	u32 bs = 0;
+	s32 out = -1;
+	int r;
+
+	base = base ? base + 1 : g->path;
+	snprintf(dst, sizeof dst, "/dev_hdd0/PS2ISO/%s", base);
+	snprintf(part, sizeof part, "%s.part", dst);
+	logf_("=== copy card PS2 game, app v%s: %s -> %s", APP_VERSION, g->path, dst);
+	{
+		sysFSStat st;
+
+		if (sysFsStat(dst, &st) == 0)
+		{
+			snprintf(msg, msg_n, "%s is already on the hard disk", g->shown);
+			return 0;
+		}
+	}
+	progress(NULL, "ONE MOMENT", title, 0.2f, "Opening the game on the card");
+	r = fsport_attach(slot_storage(g->slot));	/* v0.66: the game's own slot (v0.63: the one card's slot) */
+	if (r == 0)
+		r = lr_fs_mount();
+	if (r == 0)
+		r = lr_fs_open(g->path, &size);
+	if (r || !size)
+	{
+		fsport_detach();
+		snprintf(msg, msg_n, "Could not open the game on the %s card (%d)", slot_name(g->slot), r);
+		return 0;
+	}
+	total = size;
+	nfiles = 1;
+	if (sysFsGetFreeSize("/dev_hdd0", &bs, &freeb) == 0 && (u64)bs * freeb < size + (64ull << 20))
+	{
+		fsport_detach();
+		snprintf(msg, msg_n, "Not enough room on the hard disk: %.1f GB needed, %.1f GB free", size / 1073741824.0,
+			(double)bs * freeb / 1073741824.0);
+		return 0;
+	}
+	buf = (u8 *)malloc(BUF_SZ);
+	sysFsMkdir("/dev_hdd0/PS2ISO", 0777);
+	if (!buf || sysFsOpen(part, SYS_O_WRONLY | SYS_O_CREAT | SYS_O_TRUNC, &out, NULL, 0) != 0)
+	{
+		int nomem = !buf;
+
+		fsport_detach();
+		free(buf);
+		buf = NULL;
+		snprintf(msg, msg_n, nomem ? "Out of memory" : "Could not write to the hard disk");
+		return 0;
+	}
+	sysFsChmod(part, 0777);
+	show_head = "COPYING TO THE HARD DISK";
+	t0 = tb();
+	show("starting");
+	for (off = 0; off < size && !r; )
+	{
+		u32 n = size - off < BUF_SZ ? (u32)(size - off) : BUF_SZ;
+		u64 w = 0;
+
+		if (lr_file_read(off, buf, n))
+			r = -6;
+		else if (sysFsWrite(out, buf, n, &w) != 0 || w != n)
+			r = -3;
+		off += n;
+		done = off;
+		if (!r && (done - last >= (4u << 20) || tb() - t_shown > TB_HZ / 2))
+		{
+			show(base);
+			t_shown = tb();
+			last = done;
+			if ((pressed() & PAD_CIRCLE) || app_events())
+			{
+				stop = 1;
+				r = -9;
+			}
+		}
+	}
+	sysFsClose(out);
+	fsport_detach();
+	free(buf);
+	buf = NULL;
+	show_head = "COPYING THE DISC";
+	logf_("card copy ended %d: %llu of %llu bytes", r, (unsigned long long)done, (unsigned long long)total);
+	if (r == 0 && sysLv2FsRename(part, dst) != 0)
+		r = -4;
+	if (r)
+	{
+		sysFsUnlink(part);
+		if (r == -9)
+			snprintf(msg, msg_n, "Stopped: nothing kept on the hard disk");
+		else
+			snprintf(msg, msg_n, "The copy stopped at %.0f MB (%s, %d): nothing kept", done / 1e6, r == -6 ? "card read" : "disk write", r);
+	}
+	else
+	{
+		double secs = (double)(tb() - t0) / TB_HZ;
+
+		snprintf(msg, msg_n, "%s copied to the hard disk: %.0f MB in %d:%02d", g->shown, total / 1e6, (int)secs / 60, (int)secs % 60);
+	}
+	return 0;
+}
+
 int copy_game(unsigned (*pad)(void), int plat, const game_t *g, char *msg, int msg_n)
 {
 	char dst[300], m[300];
 	const char *base = strrchr(g->path, '/');
 	int r = 0, i, d, n = 0, tree = plat == P_PS3 && g->kind == 3;
 
+	if (slot_bad_msg(slot_of_game(g), "Not copied", msg, msg_n))	/* v0.65: the copy would carry the slot's damage */
+		return -1;
+	if (plat == P_PS2 && g->where == 1 && g->kind < 4)
+	{
+		/* v0.56: the card's PS2 games go to the hard disk */
+		pad_fn = pad;
+		total = done = t_rd = t_wr = 0;
+		nfiles = ndirs = nfile_at = bigfile = stop = 0;
+		first_bad[0] = 0;
+		t0 = tb();
+		snprintf(title, sizeof title, "%s", g->shown);
+		pad_last = pad_fn ? pad_fn() : 0;	/* the X that chose this is not a Circle */
+		r = copy_card_ps2(g, msg, msg_n);
+		logf_("result: %s", msg);
+		return r;
+	}
 	pad_fn = pad;
 	total = done = t_rd = t_wr = 0;
 	nfiles = ndirs = nfile_at = bigfile = stop = 0;

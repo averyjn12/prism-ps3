@@ -12,6 +12,7 @@
 #include "storage.h"
 #include "games.h"
 #include "manage.h"
+#include "cardcheck.h"	/* v0.65 */
 
 game_t games[N_PLAT][MAX_GAMES];
 int n_games[N_PLAT];
@@ -127,20 +128,71 @@ static void ps1_id(const char *path, char *out)
 	fclose(m.f);
 }
 
+/* v0.63: the card can sit in any of the three slots (Bananafuzzbuddy 11-24: a microSD in a Memory Stick adaptor showed no PS2
+ * games: this read only the SD slot). Tried in the card reader's own LUN order (GL819: 0 Memory Stick, 1 SD, 2 CF;
+ * lr/README.md) because the PS2 helper takes the FIRST ready LUN: with cards in two slots, both pick the same one. */
+u64 card_dev = ST_DEV_SD;
+
 static void scan_ps2(void)
 {
-	int n, k;
+	static const u64 devs[3] = { ST_DEV_MS, ST_DEV_SD, ST_DEV_CF };
+	FILE *lg = fopen("/dev_hdd0/tmp/prism_card.log", "w");	/* v0.64: how each slot answered, with the reader's own lines */
+	int n, k, d, chosen = -1, first_err = 0;
 
 	n_games[P_PS2] = 0;
-	card_state = fsport_attach(ST_DEV_SD);
-	if (card_state)
-		return;
-	card_state = lr_fs_mount();
-	if (card_state == 0)
+	card_state = LR_E_NOMEDIUM;
+	card_bad_slot = -1;
+	fsport_log = lg;
+	/* v0.65: first every slot with a card in it: does it give back the card's real bytes (cardcheck.h) */
+	for (d = 0; d < 3; d++)
 	{
+		int r = fsport_attach(devs[d]);
+
+		slot_cc[d] = -1;
+		slot_cc_why[d][0] = 0;
+		if (lg)
+			fprintf(lg, "slot %s: open %d\n", slot_name(d), r);
+		if (r)
+		{
+			if (card_state == LR_E_NOMEDIUM)
+				card_state = r;
+			continue;
+		}
+		cardcheck_attached(d, lg);
+		if (slot_bad(d) && card_bad_slot < 0)
+			card_bad_slot = d;
+		fsport_detach();
+	}
+	/* v0.66: then EVERY sound slot whose card holds a FAT32 / exFAT volume Prism reads, all their PS2 games (Bananafuzzbuddy 11-24:
+	 * "if I have all three cards inserted at once I need it to read all three"). Each game keeps its slot; at the start
+	 * the helper is told it when another card would answer first (card_lun_for). The first card read stays card_dev:
+	 * copies to "the card's exFAT part" go there. */
+	card_read_mask = 0;
+	for (d = 0; d < 3; d++)
+	{
+		int r, before = n_games[P_PS2];
+
+		if (slot_cc[d] < 0 || slot_bad(d))
+			continue;
+		r = fsport_attach(devs[d]);
+		if (r == 0)
+			r = lr_fs_mount();
+		if (lg)
+			fprintf(lg, "slot %s: partitions %d\n", slot_name(d), r);
+		if (r)
+		{
+			if (!first_err)
+				first_err = r;	/* a card there, but no volume Prism reads */
+			fsport_detach();
+			continue;
+		}
+		if (chosen < 0)
+		{
+			chosen = d;
+			card_dev = devs[d];
+		}
+		card_read_mask |= 1 << d;
 		n = lr_fs_list();
-		if (n < 0)
-			card_state = n;
 		for (k = 0; k < n && n_games[P_PS2] < MAX_GAMES; k++)
 		{
 			game_t *g = &games[P_PS2][n_games[P_PS2]];
@@ -152,6 +204,7 @@ static void scan_ps2(void)
 			snprintf(g->name, sizeof(g->name), "%s", nm);
 			snprintf(g->path, sizeof(g->path), "%s/%s", LR_GAME_DIR, nm);
 			g->where = 1;
+			g->slot = (u8)d;
 			if (lr_fs_cat_open((u32)k, &size, 1) == 0)
 			{
 				if (iso_id(NULL, rd_card, g->id, &cd) == -1)
@@ -162,8 +215,33 @@ static void scan_ps2(void)
 			g->size = size;
 			n_games[P_PS2]++;
 		}
+		if (lg)
+			fprintf(lg, "slot %s: %d PS2 game(s)%s%s\n", slot_name(d), n_games[P_PS2] - before, n < 0 ? " (list failed)" : "",
+				card_lun_for(d) >= 0 ? ", the PS2 helper is told this slot's LUN" : "");
+		fsport_detach();
 	}
-	fsport_detach();
+	if (chosen >= 0)
+		card_state = 0;
+	else if (card_bad_slot >= 0)
+		card_state = LR_E_BADSLOT;
+	else if (first_err)
+		card_state = first_err;
+	fsport_log = NULL;
+	if (lg)
+	{
+		fprintf(lg, "cards read:%s%s%s%s\n", card_read_mask & 1 ? " Memory Stick" : "", card_read_mask & 2 ? " SD" : "",
+			card_read_mask & 4 ? " CompactFlash" : "", card_read_mask ? "" : " none");
+		fclose(lg);
+	}
+}
+
+const char *game_where_name(const game_t *g)
+{
+	static const char *const s[3] = { "MS", "SD", "CF" };
+
+	if (g->where == 1)
+		return g->slot < 3 ? s[g->slot] : "card";
+	return where_name(g->where);
 }
 
 static void psp_info(game_t *g);	/* below */
@@ -276,6 +354,70 @@ static void psp_info(game_t *g)
 		}
 	}
 	fclose(m.f);
+}
+
+/* v0.58: a PS3 or PSP game's own ICON0.PNG, for the Game covers page (covers.c): from a folder
+ * (<path>/PS3_GAME/ICON0.PNG; a disc in the drive is one too) or from inside a plain .iso (PS3_GAME/ or
+ * PSP_GAME/, the same look-up psp_info makes). buf NULL: only whether it is there (0). Else the bytes
+ * read, or < 0: -1 not there, -2 bigger than cap, -3 not a folder or a plain .iso, -4 a read failed. */
+int game_icon0(const char *path, int plat, u8 *buf, u32 cap)
+{
+	const char *top = plat == P_PSP ? "PSP_GAME" : "PS3_GAME";
+	sysFSStat st;
+	u8 b[2048];
+	img_t m;
+	u32 lba, len, k;
+	int r = -1;
+
+	if (sysFsStat(path, &st) == 0 && (st.st_mode & 0170000) == 0040000)
+	{
+		char p[320];
+		FILE *f;
+		size_t got;
+
+		snprintf(p, sizeof p, "%s/%s/ICON0.PNG", path, top);
+		f = fopen(p, "rb");
+		if (!f)
+			return -1;
+		if (!buf)
+		{
+			fclose(f);
+			return 0;
+		}
+		got = fread(buf, 1, cap, f);
+		fclose(f);
+		return got == 0 ? -4 : got >= cap ? -2 : (int)got;
+	}
+	if (!ends_ci(path, ".iso"))
+		return -3;
+	m.f = fopen(path, "rb");
+	m.sec = 2048;
+	m.data = 0;
+	if (!m.f)
+		return -1;
+	if (rd_img(&m, 16, b) == 0 && b[0] == 1 && !memcmp(b + 1, "CD001", 5)
+		&& iso_find(&m, le32(b + 158), le32(b + 166), top, &lba, &len) == 0
+		&& iso_find(&m, lba, len, "ICON0.PNG", &lba, &len) == 0 && len > 0)
+	{
+		if (!buf)
+			r = 0;
+		else if (len >= cap)
+			r = -2;
+		else
+		{
+			for (k = 0; k * 2048 < len; k++)
+			{
+				u32 n = len - k * 2048 < 2048 ? len - k * 2048 : 2048;
+
+				if (rd_img(&m, lba + k, b))
+					break;
+				memcpy(buf + k * 2048, b, n);
+			}
+			r = k * 2048 >= len ? (int)len : -4;
+		}
+	}
+	fclose(m.f);
+	return r;
 }
 
 /* one key of a PARAM.SFO (UTF-8 strings only) */
@@ -439,5 +581,7 @@ const char *where_name(int where)
 {
 	static const char *const n[] = { "SD", "SD", "HDD", "USB 0", "USB 1", "USB 2", "USB 3", "USB 4", "USB 5", "USB 6", "USB 7", "DISC", "MS", "CF" };
 
+	if (where == 1)	/* v0.63: the card read raw: in whichever slot scan_ps2 found it */
+		return card_dev == ST_DEV_MS ? "MS" : card_dev == ST_DEV_CF ? "CF" : "SD";
 	return where >= 0 && where < (int)(sizeof n / sizeof n[0]) ? n[where] : "?";
 }
