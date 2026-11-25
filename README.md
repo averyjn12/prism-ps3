@@ -15,10 +15,17 @@ agree to those terms. Prism is free, comes with no warranty, and you use it at y
 - Plays PS2 games straight from the SD card slot on the PS3 models that have one and run PS2
   discs through the PS2 emulator (CECHC and CECHE), with nothing copied to the internal drive.
   PS2 games over 4 GB can sit on a FAT32 card in parts.
-- Copies games between storage devices, one or several at a time (mark them with R2), deletes them
-  (after two questions, also from a card's exFAT part), and views, copies and deletes memory-card
-  saves.
-- Sends a PS2 save out as a `.psu` file to USB or a card (folder `PS2SAVES`) and brings one in.
+- Copies games between storage devices, one or several at a time (mark them with R2): the internal
+  drive, USB drives, and from one card slot straight to another. It can delete the original once
+  the copy has been read back and found the same. USB drives hold PS2 games for keeping (they do
+  not start from there).
+- Deletes games, one or the marked ones, after two questions, also from a card's exFAT part.
+- Memory cards: views, copies and deletes saves, makes new PS2 and PS1 cards (a new PS2 card is
+  byte for byte what the console itself makes) and renames cards.
+- Sends a PS2 save out as a `.psu` file to USB or a card (folder `PS2SAVES`, exFAT cards too) and
+  brings one in.
+- Puts card games into webMAN's PS2 list, one or the marked ones.
+- Opens PSP games in the PPSSPP PS3 port when that is installed (a third launcher choice).
 - Continue: the last five games you played, on Triangle from the home screen.
 - Looks game covers up by serial from public cover sets (Settings, Game covers). Prism ships none.
 - Menus at 60 frames a second, with Prism's own menu sounds (they can be turned off in Settings).

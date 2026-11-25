@@ -27,6 +27,7 @@ int  wm_shortcuts_add(char *msg, int n);	/* v0.55: the card's PS2 games in webMA
 /* v0.56: one card PS2 game (a game_t *) in / out of webMAN's list, from its Square menu */
 int  wm_shortcut_has(const void *g);
 int  wm_shortcut_one(const void *g, int add, char *msg, int n);
+int  wm_shortcut_many(const void *list, int cnt, int add, char *msg, int n);	/* v0.78: the marked games (game_t list[cnt]) */
 /* v0.28: SETTINGS "Start Prism with the console" (a block in /dev_hdd0/autoexec.bat) */
 int  autostart_on(void);
 int  autostart_set(int on, char *msg, int n);

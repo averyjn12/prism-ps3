@@ -909,6 +909,8 @@ int wm_shortcut_has(const void *gv)
 	return exists(p) && wmsc_is_ours(p);
 }
 
+static int wmsc_norefresh;	/* v0.78: wm_shortcut_many asks webMAN to read its lists again once, at the end */
+
 int wm_shortcut_one(const void *gv, int add, char *msg, int n)
 {
 	const game_t *g = (const game_t *)gv;
@@ -921,7 +923,8 @@ int wm_shortcut_one(const void *gv, int add, char *msg, int n)
 	{
 		if (wmsc_is_ours(dst))
 			sysFsUnlink(dst);
-		wm_get("/refresh.ps3", resp, sizeof resp);
+		if (!wmsc_norefresh)
+			wm_get("/refresh.ps3", resp, sizeof resp);
 		snprintf(msg, n, "%s is out of webMAN's list", g->shown);
 		return 0;
 	}
@@ -955,9 +958,69 @@ int wm_shortcut_one(const void *gv, int add, char *msg, int n)
 		fprintf(f, "%s\n", nm);
 		fclose(f);
 	}
-	wm_get("/refresh.ps3", resp, sizeof resp);
+	if (!wmsc_norefresh)
+		wm_get("/refresh.ps3", resp, sizeof resp);
 	snprintf(msg, n, "%s is in webMAN's PS2 list now, folder SDCARD. Start it there with the card in.", g->shown);
 	return 0;
+}
+
+/* v0.78 (Bananafuzzbuddy, 11-25: "if I mark multiple it doesnt give me the option to copy to webman, only if i select 1"):
+ * the marked games, one after another by wm_shortcut_one. Only games on a card read by Prism have a shortcut. */
+int wm_shortcut_many(const void *listv, int cnt, int add, char *msg, int n)
+{
+	const game_t *list = (const game_t *)listv;
+	char m[220], why1[220], resp[200], tail[80];
+	int k, did = 0, was = 0, skip = 0, bad = 0;
+
+	why1[0] = tail[0] = 0;
+	wmsc_norefresh = 1;
+	for (k = 0; k < cnt; k++)
+	{
+		const game_t *g = &list[k];
+		int had;
+
+		if (g->where != 1 || g->kind >= 4)
+		{
+			skip++;
+			continue;
+		}
+		had = wm_shortcut_has(g);
+		if (add ? had : !had)
+		{
+			was++;
+			continue;
+		}
+		m[0] = 0;
+		wm_shortcut_one(g, add, m, sizeof m);
+		if (wm_shortcut_has(g) == (add ? 1 : 0))
+			did++;
+		else
+		{
+			bad++;
+			if (!why1[0])
+				snprintf(why1, sizeof why1, "%s", m);
+		}
+	}
+	wmsc_norefresh = 0;
+	if (did)
+		wm_get("/refresh.ps3", resp, sizeof resp);
+	if (was || skip)
+	{
+		int l = snprintf(tail, sizeof tail, " (");
+
+		if (was)
+			l += snprintf(tail + l, sizeof tail - l, add ? "%d already there" : "%d not in it", was);
+		if (skip)
+			l += snprintf(tail + l, sizeof tail - l, "%s%d not on a card", was ? ", " : "", skip);
+		snprintf(tail + l, sizeof tail - l, ")");
+	}
+	if (bad)
+		snprintf(msg, n, "%d %s webMAN's PS2 list%s. %d not: %s", did, add ? "added to" : "taken out of", tail, bad, why1);
+	else if (add)
+		snprintf(msg, n, "%d added to webMAN's PS2 list, folder SDCARD%s. Start them there with the card in.", did, tail);
+	else
+		snprintf(msg, n, "%d taken out of webMAN's PS2 list%s.", did, tail);
+	return bad ? -1 : 0;
 }
 
 static void wm_shortcuts_remove(void)

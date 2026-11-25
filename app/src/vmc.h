@@ -71,6 +71,17 @@ int vmc_delete(card_t *c, int si, char *why, int why_n);
 int vmc_export_psu(card_t *c, int si, const char *path, char *why, int why_n);
 int vmc_import_psu(const char *path, card_t *to, char *why, int why_n);
 int vmc_psu_name(const char *path, char *name, unsigned *files);	/* name[33]: the save's folder in the file; 0 = it is a .psu */
+/* vmcnew.c (v0.79): a new, empty card file, and a card's name. Neither touches an existing card's bytes. */
+#define VMC_PS2_BYTES	8650752L	/* 16384 pages of 512 + 16 */
+#define VMC_PS1_BYTES	131072L
+#define VMC_NAME_MAX	28
+void vmc_stamp(unsigned long long unix_s, u8 out[8]);		/* the clock as a PS2 card's time (Japan's, as a PS2 keeps it) */
+void vmc_new_ps2_image(u8 *img, const u8 stamp[8]);		/* what the PS3's own new card holds (host/vmcnew_test.sh) */
+void vmc_new_ps1_image(u8 *img);
+int  vmc_name_ok(const char *name, char *why, int why_n);	/* 0 = a card may be called that */
+int  vmc_same_name(const char *file, const char *name);
+int  vmc_new(const char *dir, const char *name, int ps1, unsigned long long unix_s, char *why, int why_n);
+int  vmc_rename(const char *dir, const char *old_file, const char *new_name, char *new_file, int new_file_n, char *why, int why_n);
 /* the ECC the PS2 card keeps for each 128 bytes (checked against every written page of the
  * owner's three cards, 6327 of 6327) */
 void vmc_ecc128(const u8 *chunk, u8 out[3]);

@@ -38,6 +38,16 @@ static uint8_t pattern(uint64_t seed, uint64_t i)
 	return (uint8_t)(x >> (8 * (i & 7)));
 }
 
+static int ls_cb(void *arg, const char *name, uint64_t size, int is_dir)
+{
+	(void)arg;
+	if (is_dir)
+		printf("d %s\n", name);
+	else
+		printf("%llu %s\n", (unsigned long long)size, name);
+	return 0;
+}
+
 int main(int argc, char **argv)
 {
 	exw_dev d;
@@ -61,6 +71,51 @@ int main(int argc, char **argv)
 			fputc(pattern(seed, i), o);
 		fclose(o);
 		return 0;
+	}
+	if (argc >= 4 && (!strcmp(argv[1], "--mkdir") || !strcmp(argv[1], "--ls") || !strcmp(argv[1], "--cat")))
+	{
+		/* v0.74: --mkdir <image> <name> | --ls <image> <folder> ("size name" a line; a folder: "d name") |
+		 * --cat <image> <folder> <name> (the file's bytes to stdout) */
+		img = fopen(argv[2], "r+b");
+		if (!img)
+			return 3;
+		fseeko(img, 0, SEEK_END);
+		d.rd = rd;
+		d.wr = wr;
+		d.ctx = NULL;
+		d.sectors = (uint32_t)(ftello(img) / 512);
+		if (!strcmp(argv[1], "--mkdir"))
+		{
+			r = exw_mkdir(&d, argv[3], why, sizeof why);
+			printf("mkdir %d: %s\n", r, why);
+		}
+		else if (!strcmp(argv[1], "--ls"))
+		{
+			r = exw_list(&d, argv[3], ls_cb, NULL, why, sizeof why);
+			if (r)
+				fprintf(stderr, "ls %d: %s\n", r, why);
+		}
+		else
+		{
+			static uint8_t big[16 << 20];
+			uint32_t n = 0, k;
+
+			memset(big, 0xA5, sizeof big);
+			r = argc >= 5 ? exw_read(&d, argv[3], argv[4], big, (16 << 20) - 1024, &n, why, sizeof why) : -9;
+			/* nothing past the file's own bytes may be written: the caller's buffer may end there */
+			for (k = n; !r && k < n + 1024; k++)
+				if (big[k] != 0xA5)
+				{
+					snprintf(why, sizeof why, "the read wrote past the file's size (byte %u of %u)", k, n);
+					r = -8;
+				}
+			if (r)
+				fprintf(stderr, "cat %d: %s\n", r, why);
+			else
+				fwrite(big, 1, n, stdout);
+		}
+		fclose(img);
+		return r ? 1 : 0;
 	}
 	if (argc == 3 && !strcmp(argv[1], "--space"))
 	{

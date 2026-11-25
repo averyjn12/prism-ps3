@@ -301,6 +301,31 @@ static int plan(int plat, const game_t *g, char *why, int n)
 		}
 		return n_del ? 0 : -7;
 	}
+	if (plat == P_PS2 && g->where >= 3 && g->where <= 10)
+	{
+		/* v0.78: a PS2 image kept on a USB drive: /dev_usbNNN/PS2ISO/<one name>, with what came along with it */
+		char p[300];
+		const char *dot = strrchr(g->path, '.');
+		int k = dot ? (int)(dot - g->path) : (int)strlen(g->path);
+		static const char *const ext[] = { ".png", ".PNG", ".jpg", ".JPG" };
+
+		if (strlen(g->path) < 20 || strncmp(g->path, "/dev_usb00", 10) || strncmp(g->path + 11, "/PS2ISO/", 8) || strchr(g->path + 19, '/'))
+		{
+			snprintf(why, n, "Not a PS2 image Prism deletes (%s)", g->path);
+			return -6;
+		}
+		add_file(g->path);
+		snprintf(p, sizeof p, "%s.CONFIG", g->path);
+		add_file(p);
+		for (i = 0; i < 4; i++)
+		{
+			snprintf(p, sizeof p, "%.*s%s", k, g->path, ext[i]);
+			add_file(p);
+		}
+		if (!n_del)
+			snprintf(why, n, "Its file was not found on the USB drive");
+		return n_del ? 0 : -7;
+	}
 	if (plat == P_PS2 && g->where == 1 && g->exfat)
 	{
 		/* v0.73 (Bananafuzzbuddy, 11-25: "if a game is in an exfat partition I can't delete it? ... i obviously can see
@@ -426,6 +451,11 @@ static int busy(const game_t *g, char *why, int n)
 		return 1;
 	}
 	return 0;
+}
+
+unsigned long long game_del_bytes(void)	/* v0.75: the size of what the last game_del_plan found */
+{
+	return del_bytes;
 }
 
 int game_del_plan(int plat, const game_t *g, char *what, int n)

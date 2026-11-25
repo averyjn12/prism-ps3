@@ -64,7 +64,8 @@ count += copy_tree("app/ref")
 # the PC tests: code and scripts only (no screenshots, no art file with game covers)
 count += copy_tree("app/host", skip_dirs=("shots", "shots_before", "shots_v15", "shots_v22", "shots_v27", "shots_v28", "shots_v46", "sound",
                               # v0.74: copies of older source kept while rewriting, not part of the program
-                              "backup_2026-11-24", "backup_2026-11-24_pre67"))
+                              # (v0.79: every host/backup_* folder; two new ones had slipped into the export)
+                              ) + tuple(d for d in os.listdir(os.path.join(lr, "app", "host")) if d.startswith("backup_")))
 for f in ("app/build_app.sh", "app/README.md", "app/setup/carrier.iso", "app/setup/carrier.png", "app/setup/tinytees.iso",
           # v0.57 / v0.59: what build_app.sh packages besides (the cover SOURCES list, no covers; Tiny Tees' own cover)
           "app/setup/cover_sources.txt", "app/setup/tinytees_cover.png", "app/setup/tinytees_cover.rgba",

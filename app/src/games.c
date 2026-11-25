@@ -480,13 +480,16 @@ static int has_marker(const char *path)
 	return r;
 }
 
-static void scan_hdd_ps2(void)
+/* v0.78 (Bananafuzzbuddy, 11-25: "I can't transfer anything to the usb sticks"): the same for <usb drive>/PS2ISO, where a
+ * copy made by rip.c lands. Kept there, not played there (main.c start() says so): listed so that it can be
+ * copied back or deleted. where = games.h's device number (2 the hard disk, 3..10 the USB drives). */
+static void scan_fs_ps2(const char *dir, int where)
 {
 	sysFSDirent e;
 	u64 rd;
 	s32 fd;
 
-	if (sysFsOpendir("/dev_hdd0/PS2ISO", &fd) != 0)
+	if (sysFsOpendir(dir, &fd) != 0)
 		return;
 	while (sysFsReaddir(fd, &e, &rd) == 0 && rd > 0 && n_games[P_PS2] < MAX_GAMES)
 	{
@@ -498,12 +501,12 @@ static void scan_hdd_ps2(void)
 		if (e.d_name[0] == '.' || !(ends_ci(e.d_name, ".iso") || ends_ci(e.d_name, ".bin")))
 			continue;
 		memset(g, 0, sizeof(*g));
-		snprintf(g->path, sizeof(g->path), "/dev_hdd0/PS2ISO/%s", e.d_name);
+		snprintf(g->path, sizeof(g->path), "%s/%s", dir, e.d_name);
 		if (sysFsStat(g->path, &st) != 0 || (st.st_mode & 0170000) == 0040000 || has_marker(g->path))
 			continue;
 		snprintf(g->name, sizeof(g->name), "%s", e.d_name);
 		g->size = st.st_size;
-		g->where = 2;
+		g->where = (u8)where;
 		m.f = fopen(g->path, "rb");
 		if (m.f)
 		{
@@ -547,7 +550,14 @@ void games_scan(void)
 		scan_dir(P_PSP, p, (int)i);
 	}
 	scan_ps2();
-	scan_hdd_ps2();			/* v0.16 */
+	scan_fs_ps2("/dev_hdd0/PS2ISO", 2);	/* v0.16 */
+	for (i = 3; i <= 10; i++)
+	{
+		char p[64];
+
+		snprintf(p, sizeof p, "%s/PS2ISO", dev_path[i]);
+		scan_fs_ps2(p, (int)i);		/* v0.78 */
+	}
 	scan_disc_and_shortcuts();	/* v0.15 */
 }
 

@@ -541,11 +541,13 @@ enum { GM_BROWSE, GM_OPTIONS, GM_ASK1, GM_ASK2 };
 /* v0.61: a PSP game's own launcher (launch.c psp_launcher_*), when both are installed */
 /* v0.67: with games marked, Square is about the marked games */
 enum { OPT_ADD_SC, OPT_DEL_SC, OPT_RIP, OPT_COPY, OPT_DELETE, OPT_CANCEL, OPT_COPY_HDD, OPT_WM_ADD, OPT_WM_DEL, OPT_COV_DEL, OPT_COV_ALLOW,
-	OPT_PSPL_REM, OPT_PSPL_MIN, OPT_COPY_MARKED, OPT_CLEAR_MARKS, OPT_PSPL_PPS };
+	OPT_PSPL_REM, OPT_PSPL_MIN, OPT_COPY_MARKED, OPT_CLEAR_MARKS, OPT_PSPL_PPS, OPT_DEL_MARKED,	/* v0.75: OPT_DEL_MARKED */
+	OPT_WM_ADD_MARKED, OPT_WM_DEL_MARKED };	/* v0.78 */
 static const char *const opt_text[] = { "Add to this list", "Remove from this list", "Copy the disc to a storage device",
-	"Copy to another device", "Delete", "Cancel", "Copy to the hard disk", "Add to webMAN's list", "Remove from webMAN's list",
+	"Copy to another device", "Delete", "Cancel", "Copy to another device" /* v0.78: it asks where (v0.77), no longer "to the hard disk" */, "Add to webMAN's list", "Remove from webMAN's list",
 	"Remove its cover", "Let Game covers find its cover", "Start it with the Remaster launcher", "Start it with the Minis launcher",
-	"Copy the marked games", "Take the marks off", "Open it in PPSSPP" };
+	"Copy the marked games", "Take the marks off", "Open it in PPSSPP", "Delete the marked games",
+	"Add them to webMAN's list", "Remove them from webMAN's list" };
 static int gm_mode, gm_pick, gm_n, gm_opt[8];
 static unsigned gm_at;
 static char gm_what[160];
@@ -558,6 +560,26 @@ static void gm_options(const game_t *g)
 	{
 		/* v0.67 */
 		gm_opt[gm_n++] = OPT_COPY_MARKED;
+		if (plat == P_PS2)
+		{
+			/* v0.78 (Bananafuzzbuddy, 11-25: "if I mark multiple it doesnt give me the option to copy to webman"): the
+			 * marked games on a card, in / out of webMAN's list, as one game's menu offers */
+			int k, in = 0, notin = 0;
+
+			for (k = 0; k < n_games[plat]; k++)
+				if (mark[k] && games[plat][k].where == 1 && games[plat][k].kind < 4)
+				{
+					if (wm_shortcut_has(&games[plat][k]))
+						in++;
+					else
+						notin++;
+				}
+			if (notin)
+				gm_opt[gm_n++] = OPT_WM_ADD_MARKED;
+			if (in)
+				gm_opt[gm_n++] = OPT_WM_DEL_MARKED;
+		}
+		gm_opt[gm_n++] = OPT_DEL_MARKED;	/* v0.75 (Bananafuzzbuddy, 11-25: "select multiple games with R2 and then delete them all") */
 		gm_opt[gm_n++] = OPT_CLEAR_MARKS;
 		gm_opt[gm_n++] = OPT_CANCEL;
 		gm_pick = 0;
@@ -574,7 +596,7 @@ static void gm_options(const game_t *g)
 	{
 		/* v0.38: a PS2 game on the hard disk can be copied (to the card's exFAT part); the ones on
 		 * the card stay where they are (Bananafuzzbuddy, 11-23: a PS2 game's options had no copy entry) */
-		if (plat != P_PS2 || g->where == 2)
+		if (plat != P_PS2 || g->where != 1)	/* v0.78: a PS2 game kept on a USB drive too */
 			gm_opt[gm_n++] = OPT_COPY;
 		if (plat == P_PS2 && g->where == 1)
 		{
@@ -607,11 +629,21 @@ static void gm_options(const game_t *g)
 	gm_mode = GM_OPTIONS;
 }
 
+static int gm_many;	/* v0.75: the two questions are about this many marked games (0 = about the chosen game) */
+
 void ui_ask_delete(const char *what)
 {
 	snprintf(gm_what, sizeof gm_what, "%s", what);
 	gm_mode = GM_ASK1;
 	gm_pick = 0;			/* starts on "No" */
+	gm_many = 0;
+}
+
+/* v0.75: the same two questions for every marked game at once; main.c has planned each one first */
+void ui_ask_delete_many(int n, const char *what)
+{
+	ui_ask_delete(what);
+	gm_many = n;
 }
 
 static void sheet(float x0, float y0, float x1, float y1)
@@ -663,7 +695,7 @@ static void gm_overlay(const game_t *g)
 				rect(166.0f, (float)y - 5.0f, 474.0f, (float)y + 23.0f, RGBA(0x7F, 0xE3, 0xFF, 0x1C));
 				frame_rect(166.0f, (float)y - 5.0f, 474.0f, (float)y + 23.0f, 1.0f, GLOW);
 			}
-			text_centre(F_BODY, 320, y, 0, gm_opt[k] == OPT_DELETE ? AMBER : on ? INK : DIM, opt_text[gm_opt[k]]);
+			text_centre(F_BODY, 320, y, 0, gm_opt[k] == OPT_DELETE || gm_opt[k] == OPT_DEL_MARKED ? AMBER : on ? INK : DIM, opt_text[gm_opt[k]]);
 		}
 	}
 	else if (gm_mode == GM_ASK1 || gm_mode == GM_ASK2)
@@ -671,9 +703,21 @@ static void gm_overlay(const game_t *g)
 		int last = gm_mode == GM_ASK2, armed = !last || frame - gm_at >= ASK2_ARM;
 
 		sheet(120.0f, 128.0f, 520.0f, 312.0f);
-		text_centre(F_BOLD, 320, 144, 0, INK, last ? "Delete it for good?" : "Delete this game?");
-		fit(ln, sizeof ln, F_BODY, g->shown, 370);
-		text_centre(F_BODY, 320, 180, 0, INK, ln);
+		if (gm_many)
+		{
+			char t[60];
+
+			snprintf(t, sizeof t, last ? "Delete all %d for good?" : "Delete these %d games?", gm_many, gm_many);
+			text_centre(F_BOLD, 320, 144, 0, INK, t);
+			snprintf(ln, sizeof ln, "%d MARKED GAMES", gm_many);
+			text_centre(F_BODY, 320, 180, 2, AMBER, ln);
+		}
+		else
+		{
+			text_centre(F_BOLD, 320, 144, 0, INK, last ? "Delete it for good?" : "Delete this game?");
+			fit(ln, sizeof ln, F_BODY, g->shown, 370);
+			text_centre(F_BODY, 320, 180, 0, INK, ln);
+		}
 		fit(ln, sizeof ln, F_SMALL, gm_what, 380);
 		text_centre(F_SMALL, 320, 208, 0, DIM, ln);
 		text_centre(F_SMALL, 320, 230, 0, AMBER, last ? "This is the last question. It cannot be undone." : "It cannot be brought back afterwards.");
@@ -788,7 +832,8 @@ static void draw_games(void)
 		/* v0.67: Square is about the marked games now */
 		char t[24];
 
-		snprintf(t, sizeof t, "Copy %d marked", n_mark);
+		/* v0.78 (Bananafuzzbuddy, 11-25): it opens a menu (copy, delete, webMAN's list), so it says so */
+		snprintf(t, sizeof t, "%d marked: options", n_mark);
 		x = legend_item(x, IC_SQUARE, NULL, t);
 	}
 	else
@@ -1572,7 +1617,8 @@ int ui_pad(unsigned pressed, unsigned held)
 		else if (pressed & PAD_CROSS)
 		{
 			static const int act[] = { DO_SC_ADD, DO_SC_DEL, DO_RIP, DO_COPYGAME, DO_DELETE_ASK, DO_NOTHING,
-				DO_COPYGAME, DO_WM_ADD, DO_WM_DEL, DO_COV_DEL, DO_COV_ALLOW, DO_PSPL_REM, DO_PSPL_MIN, DO_COPYMARKED, DO_NOTHING, DO_PSPL_PPS };
+				DO_COPYGAME, DO_WM_ADD, DO_WM_DEL, DO_COV_DEL, DO_COV_ALLOW, DO_PSPL_REM, DO_PSPL_MIN, DO_COPYMARKED, DO_NOTHING, DO_PSPL_PPS,
+				DO_DELMARKED_ASK, DO_WM_ADD_MARKED, DO_WM_DEL_MARKED };
 
 			if (gm_opt[gm_pick] == OPT_CLEAR_MARKS)
 				marks_clear();	/* v0.67 */
@@ -1602,7 +1648,7 @@ int ui_pad(unsigned pressed, unsigned held)
 			{
 				gm_mode = GM_BROWSE;
 				sel_of[plat] = n_view ? view[sel] : 0;
-				return DO_DELETE;
+				return gm_many ? DO_DELMARKED : DO_DELETE;
 			}
 		}
 		return DO_NOTHING;

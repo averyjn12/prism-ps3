@@ -635,13 +635,73 @@ static uint16_t name_hash(void)
 	return h;
 }
 
-int exw_finish(char *why, int wn)
+/* The entry set (File 0x85 + Stream Extension 0xC0 + File Name 0xC1 entries) for uname, written into free
+ * slots of the folder prep() found. attr 0x0020 = a file, 0x0010 = a folder. v0.74: out of exw_finish. */
+static int add_entry(uint32_t attr, uint32_t clus, uint64_t size, char *why, int wn)
 {
 	uint8_t set[32 * 20];
 	int names = (ulen + 14) / 15, count = 2 + names, i, k;
 	struct slot_find sf;
-	uint64_t first_byte, last_byte, b;
 	uint32_t stamp = (uint32_t)(2026 - 1980) << 25 | 1u << 21 | 1u << 16;	/* 2026-01-01 00:00 */
+
+	memset(set, 0, sizeof set);
+	set[0] = 0x85;
+	set[1] = (uint8_t)(count - 1);
+	put16(set + 4, attr);
+	put32(set + 8, stamp);
+	put32(set + 12, stamp);
+	put32(set + 16, stamp);
+	set[32] = 0xC0;
+	set[33] = 0x03;				/* allocation possible, no FAT chain */
+	set[35] = (uint8_t)ulen;
+	put16(set + 36, name_hash());
+	put64(set + 40, size);			/* valid data length */
+	put32(set + 52, clus);
+	put64(set + 56, size);			/* data length */
+	for (i = 0; i < names; i++)
+	{
+		uint8_t *e = set + 64 + 32 * i;
+
+		e[0] = 0xC1;
+		for (k = 0; k < 15 && i * 15 + k < ulen; k++)
+			put16(e + 2 + 2 * k, uname[i * 15 + k]);
+	}
+	put16(set + 2, set_sum(set, count));
+	memset(&sf, 0, sizeof sf);
+	sf.need = count;
+	if (walk(dir_clus, dir_nofat, dir_len, slot_cb, &sf) || !sf.got)
+	{
+		say(why, wn, "the folder has no room for another entry (the data is written but not named)");
+		return -3;
+	}
+	/* the sectors of the set, last first: the File entry, which makes the set count, goes last */
+	for (i = count - 1; i >= 0; )
+	{
+		uint32_t lba = chain_lba(dir_clus, dir_nofat, sf.at + 32 * (uint64_t)i);
+		int j;
+
+		if (!lba || rd(lba, 1, sbuf))
+		{
+			say(why, wn, "could not read the folder");
+			return -4;
+		}
+		/* every entry of the set that falls in this sector */
+		for (j = i; j >= 0 && chain_lba(dir_clus, dir_nofat, sf.at + 32 * (uint64_t)j) == lba; j--)
+			memcpy(sbuf + (sf.at + 32 * (uint64_t)j) % SEC, set + 32 * j, 32);
+		if (wr(lba, 1, sbuf))
+		{
+			say(why, wn, "could not write the folder entry");
+			return -5;
+		}
+		i = j;
+	}
+	return 0;
+}
+
+int exw_finish(char *why, int wn)
+{
+	uint64_t first_byte, last_byte, b;
+	int r2;
 
 	if (!active || f_done != f_size)
 	{
@@ -669,59 +729,11 @@ int exw_finish(char *why, int wn)
 		}
 	}
 	/* 2. the folder entry set */
-	memset(set, 0, sizeof set);
-	set[0] = 0x85;
-	set[1] = (uint8_t)(count - 1);
-	put16(set + 4, 0x0020);			/* archive */
-	put32(set + 8, stamp);
-	put32(set + 12, stamp);
-	put32(set + 16, stamp);
-	set[32] = 0xC0;
-	set[33] = 0x03;				/* allocation possible, no FAT chain */
-	set[35] = (uint8_t)ulen;
-	put16(set + 36, name_hash());
-	put64(set + 40, f_size);		/* valid data length */
-	put32(set + 52, f_clus);
-	put64(set + 56, f_size);		/* data length */
-	for (i = 0; i < names; i++)
+	r2 = add_entry(0x0020, f_clus, f_size, why, wn);	/* archive */
+	if (r2)
 	{
-		uint8_t *e = set + 64 + 32 * i;
-
-		e[0] = 0xC1;
-		for (k = 0; k < 15 && i * 15 + k < ulen; k++)
-			put16(e + 2 + 2 * k, uname[i * 15 + k]);
-	}
-	put16(set + 2, set_sum(set, count));
-	memset(&sf, 0, sizeof sf);
-	sf.need = count;
-	if (walk(dir_clus, dir_nofat, dir_len, slot_cb, &sf) || !sf.got)
-	{
-		say(why, wn, "the folder has no room for another entry (the data is written but not named)");
 		active = 0;
-		return -3;
-	}
-	/* the sectors of the set, last first: the File entry, which makes the set count, goes last */
-	for (i = count - 1; i >= 0; )
-	{
-		uint32_t lba = chain_lba(dir_clus, dir_nofat, sf.at + 32 * (uint64_t)i);
-		int j;
-
-		if (!lba || rd(lba, 1, sbuf))
-		{
-			say(why, wn, "could not read the folder");
-			active = 0;
-			return -4;
-		}
-		/* every entry of the set that falls in this sector */
-		for (j = i; j >= 0 && chain_lba(dir_clus, dir_nofat, sf.at + 32 * (uint64_t)j) == lba; j--)
-			memcpy(sbuf + (sf.at + 32 * (uint64_t)j) % SEC, set + 32 * j, 32);
-		if (wr(lba, 1, sbuf))
-		{
-			say(why, wn, "could not write the folder entry");
-			active = 0;
-			return -5;
-		}
-		i = j;
+		return r2;
 	}
 	active = 0;
 	return 0;
@@ -876,5 +888,215 @@ int exw_space(const exw_dev *dev, uint64_t *free_b, uint64_t *total_b, char *why
 		return -1;
 	*free_b = exw_free_bytes();
 	*total_b = (uint64_t)nclus << (spc_shift + 9);
+	return 0;
+}
+
+/* ---- v0.74: what PS2 save files on an exFAT-only card need (savefiles.c): a folder made, a folder
+ * listed, a small file read. The PS3 mounts FAT32 only, so a Memory Stick formatted exFAT was no place
+ * for a save file (Bananafuzzbuddy, 11-25). ---- */
+
+/* Make the folder <name> in the root. One free cluster, written as zeros (an empty folder), marked used,
+ * then named: the same order as a file (data, bitmap, entry), with the same meaning when stopped between.
+ * 0 = made; -1 = nothing changed; lower = stopped after the bitmap (a cluster marked used that nothing names). */
+int exw_mkdir(const exw_dev *dev, const char *name, char *why, int wn)
+{
+	static const uint8_t zero[SEC * 8];
+	struct find_name fd;
+	uint64_t i, csz;
+	uint32_t c = 0, lba, left;
+	int r;
+
+	if (prep(dev, NULL, why, wn))
+		return -1;
+	csz = (uint64_t)SEC << spc_shift;
+	ulen = to_u16(name, uname, 255);
+	if (ulen <= 0)
+	{
+		say(why, wn, "the name cannot be used on exFAT");
+		return -1;
+	}
+	memset(&fd, 0, sizeof fd);
+	fd.w = uname;
+	fd.n = ulen;
+	if (walk(dir_clus, dir_nofat, dir_len, name_cb, &fd))
+	{
+		say(why, wn, "could not read the folder");
+		return -1;
+	}
+	if (fd.got)
+	{
+		say(why, wn, "that name is already there");
+		return -1;
+	}
+	for (i = 0; i < nclus; i++)
+		if (!(bmp[i >> 3] & (1u << (i & 7))))
+		{
+			c = (uint32_t)i + 2;
+			break;
+		}
+	if (!c)
+	{
+		say(why, wn, "the card's exFAT part is full");
+		return -1;
+	}
+	/* 1. an empty folder's cluster is all zeros (a free cluster holds whatever was there before) */
+	for (lba = clus_lba(c), left = 1u << spc_shift; left; )
+	{
+		uint32_t n = left < 8 ? left : 8;
+
+		if (wr(lba, n, zero))
+		{
+			say(why, wn, "could not write to the card");
+			return -1;
+		}
+		lba += n;
+		left -= n;
+	}
+	/* 2. the cluster is used */
+	bmp[(c - 2) >> 3] |= (uint8_t)(1u << ((c - 2) & 7));
+	i = ((uint64_t)(c - 2) >> 3) / SEC * SEC;
+	lba = chain_lba(bmp_clus, 0, i);
+	if (!lba || wr(lba, 1, bmp + i))
+	{
+		say(why, wn, "could not write the allocation bitmap");
+		return -2;
+	}
+	/* 3. its name in the root */
+	r = add_entry(0x0010, c, csz, why, wn);
+	return r;
+}
+
+struct list_st
+{
+	int state, left, dir, name_len, name_at;
+	uint64_t len;
+	uint16_t name[256];
+	exw_list_cb cb;
+	void *arg;
+};
+
+static int list_cb(const uint8_t *e, uint64_t off, void *arg)
+{
+	struct list_st *f = (struct list_st *)arg;
+	int k;
+
+	(void)off;
+	if (e[0] == 0)
+		return 1;
+	if (e[0] == 0x85)
+	{
+		f->state = 1;
+		f->left = e[1];
+		f->dir = (le16(e + 4) & 0x10) != 0;
+		f->name_at = f->name_len = 0;
+		return 0;
+	}
+	if (f->state != 1 || !(e[0] & 0x80))
+	{
+		f->state = 0;
+		return 0;
+	}
+	if (e[0] == 0xC0)
+	{
+		f->name_len = e[3];
+		f->len = le64(e + 24);
+	}
+	else if (e[0] == 0xC1)
+		for (k = 0; k < 15 && f->name_at < f->name_len && f->name_at < 255; k++)
+			f->name[f->name_at++] = (uint16_t)le16(e + 2 + 2 * k);
+	if (--f->left == 0)
+	{
+		f->state = 0;
+		if (f->name_len && f->name_at == f->name_len)
+		{
+			char u8[256 * 3 + 1];
+			int n = 0;
+
+			for (k = 0; k < f->name_len; k++)
+			{
+				uint32_t c = f->name[k];
+
+				if (c < 0x80)
+					u8[n++] = (char)c;
+				else if (c < 0x800)
+				{
+					u8[n++] = (char)(0xC0 | (c >> 6));
+					u8[n++] = (char)(0x80 | (c & 0x3F));
+				}
+				else
+				{
+					u8[n++] = (char)(0xE0 | (c >> 12));
+					u8[n++] = (char)(0x80 | ((c >> 6) & 0x3F));
+					u8[n++] = (char)(0x80 | (c & 0x3F));
+				}
+			}
+			u8[n] = 0;
+			if (f->cb(f->arg, u8, f->len, f->dir))
+				return 1;
+		}
+	}
+	return 0;
+}
+
+/* Every name in <dir> (one folder under the root) goes to cb; cb returns 1 to stop. Nothing is written. */
+int exw_list(const exw_dev *dev, const char *dir, exw_list_cb cb, void *arg, char *why, int wn)
+{
+	struct list_st st;
+
+	if (prep(dev, dir, why, wn))
+		return -1;
+	memset(&st, 0, sizeof st);
+	st.cb = cb;
+	st.arg = arg;
+	if (walk(dir_clus, dir_nofat, dir_len, list_cb, &st))
+	{
+		say(why, wn, "could not read the folder");
+		return -1;
+	}
+	return 0;
+}
+
+/* The whole of the file <dir>/<name> into buf (cap bytes); *len = its size. For small files (a save file):
+ * a file kept as a FAT chain is walked from its start for every sector. Nothing is written. */
+int exw_read(const exw_dev *dev, const char *dir, const char *name, void *buf, uint32_t cap, uint32_t *len, char *why, int wn)
+{
+	struct find_name fd;
+	uint8_t sec[SEC];
+	uint64_t off;
+
+	*len = 0;
+	if (prep(dev, dir, why, wn))
+		return -1;
+	ulen = to_u16(name, uname, 255);
+	if (ulen <= 0)
+	{
+		say(why, wn, "the name cannot be used on exFAT");
+		return -1;
+	}
+	memset(&fd, 0, sizeof fd);
+	fd.w = uname;
+	fd.n = ulen;
+	if (walk(dir_clus, dir_nofat, dir_len, name_cb, &fd) || !fd.got || fd.dir)
+	{
+		say(why, wn, "no file with that name is there");
+		return -1;
+	}
+	if (fd.len > cap)
+	{
+		say(why, wn, "the file is too big to read this way");
+		return -1;
+	}
+	for (off = 0; off < fd.len; off += SEC)
+	{
+		uint32_t lba = chain_lba(fd.clus, fd.nofat, off), n = fd.len - off < SEC ? (uint32_t)(fd.len - off) : SEC;
+
+		if (!lba || rd(lba, 1, sec))
+		{
+			say(why, wn, "could not read the file");
+			return -1;
+		}
+		memcpy((uint8_t *)buf + off, sec, n);
+	}
+	*len = (uint32_t)fd.len;
 	return 0;
 }

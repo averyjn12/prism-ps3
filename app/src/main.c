@@ -193,6 +193,12 @@ static int start(const game_t *g)
 		ui_say("Not started: PS3 games do not start from a card slot. Square: copy it to the internal or a USB drive.");
 		return 0;
 	}
+	if (plat == P_PS2 && g->kind < 4 && g->where >= 3 && g->where <= 10)
+	{
+		/* v0.78: a USB drive holds PS2 games to keep them; neither webMAN nor the card reader plays them there */
+		ui_say("Not started: PS2 games do not start from a USB drive. Square: copy it to the hard disk or a card.");
+		return 0;
+	}
 	if (plat == P_PS2 && g->where == 2 && !chk.ps2_ok)
 	{
 		snprintf(msg, sizeof msg, "Not started: Prism starts PS2 games on CECHC / CECHE consoles only (%s). Start it from webMAN's list on the XMB.", chk.why);
@@ -642,6 +648,18 @@ int main(int argc, const char *argv[])
 			}
 			last = buttons();
 		}
+		else if (act == DO_WM_ADD_MARKED || act == DO_WM_DEL_MARKED)
+		{
+			/* v0.78: every marked card PS2 game (setup.c wm_shortcut_many) */
+			static game_t batch[MAX_GAMES];
+			char m[320];
+			int n = ui_marked(batch, MAX_GAMES);
+
+			progress(NULL, "ONE MOMENT", "The marked games", 0.5f, "webMAN's PS2 list, folder SDCARD");
+			wm_shortcut_many(batch, n, act == DO_WM_ADD_MARKED, m, sizeof m);
+			ui_say(m);
+			last = buttons();
+		}
 		else if (act == DO_DELETE_ASK || act == DO_DELETE || act == DO_COPYGAME || act == DO_SC_ADD || act == DO_SC_DEL)
 		{
 			const game_t *g = (const game_t *)ui_chosen();
@@ -673,6 +691,57 @@ int main(int argc, const char *argv[])
 					rescan("Looking for games again");
 					ui_say(m);
 				}
+			}
+			last = buttons();
+		}
+		else if (act == DO_DELMARKED_ASK || act == DO_DELMARKED)
+		{
+			/* v0.75: every game marked with R2. First each one is planned as a single delete is (its files
+			 * found; a mounted game, a disc or a bad card slot refuses): one that cannot go stops the whole
+			 * thing before any question. Then the same two questions, once, for all; then one by one.
+			 * Circle during the deleting stops it where it is. */
+			static game_t batch[MAX_GAMES];
+			char m[360], w[220];
+			int n = ui_marked(batch, MAX_GAMES), i, done = 0;
+
+			m[0] = 0;
+			if (act == DO_DELMARKED_ASK)
+			{
+				unsigned long long bytes = 0;
+
+				for (i = 0; i < n && !m[0]; i++)
+				{
+					progress(NULL, "ONE MOMENT", batch[i].shown, n ? (float)i / n : 0.5f, "Finding its files");
+					if (game_del_plan(plat, &batch[i], w, sizeof w))
+						snprintf(m, sizeof m, "%s cannot be deleted (%s). Take its mark off with R2, or nothing is deleted.", batch[i].shown, w);
+					else
+						bytes += game_del_bytes();
+				}
+				if (m[0] || !n)
+					ui_say(m[0] ? m : "No games are marked.");
+				else
+				{
+					if (bytes >= 1ull << 30)
+						snprintf(w, sizeof w, "%.1f GB in all, from this list", bytes / 1073741824.0);
+					else
+						snprintf(w, sizeof w, "%.0f MB in all, from this list", bytes / 1048576.0);
+					ui_ask_delete_many(n, w);
+				}
+			}
+			else
+			{
+				for (i = 0; i < n; i++)
+				{
+					if (game_delete(buttons, plat, &batch[i], w, sizeof w))
+						break;
+					done++;
+				}
+				rescan("Looking for games again");
+				if (done == n)
+					snprintf(m, sizeof m, "Deleted %d game%s.", n, n == 1 ? "" : "s");
+				else
+					snprintf(m, sizeof m, "Deleted %d of %d. It stopped at %s: %s", done, n, batch[done].shown, w);
+				ui_say(m);
 			}
 			last = buttons();
 		}

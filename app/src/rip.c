@@ -35,6 +35,7 @@
 #include "exfat_card.h"
 #include "lr.h"
 #include "manage.h"
+#include "cardcheck_core.h"	/* v0.77: CC_OK */
 #include "dirlist.h"
 #include "version.h"
 #include "ripcore.h"
@@ -194,6 +195,267 @@ static void show(const char *what)
  * cut every 1 MB fwrite into 1 KB writes: the SD slot pays ~8.6 ms per write call, so the copy
  * ran at 0.12 MB/s against webMAN's 3.6 MB/s into the same card (v0.13 log, 2026-11-22). */
 static int link_hit;	/* v0.72: the last copy_file was refused because its target is a PPSSPP stand-in */
+
+/* ---- v0.75: copy, then delete the original (Bananafuzzbuddy, 11-25: "after selecting yes ... if I want to delete the
+ * current selected games/saves after copying") ----
+ * Asked once, after the "Yes" (ask_move). An original is deleted only when its copy has been READ BACK from
+ * where it was written and found the same as the original, byte for byte (verify_file; for a card game read
+ * by Prism, in copy_card_ps2). Kinds of copy that are not read back yet (into a card's exFAT part, a PS2
+ * game in parts on FAT32) keep the original and say so. "Already there": up to v0.77 nothing was deleted (the
+ * copy there was not made now and was not compared); from v0.78 a card game's copy that is already there is
+ * compared whole first (same_on_card / card_sum) and the original goes when it is the same. The delete itself
+ * is manage.c's, with every rule it has. */
+static int move_ok;		/* this kind of copy may offer it (not a disc rip) */
+static int move_after;		/* the answer */
+static int move_unchecked;	/* this game's copy went a way that is not read back */
+static int moved_n;		/* originals deleted in this copy or batch */
+static int verify_bad;		/* a copy did not read back the same */
+
+static void ask_move(int many)
+{
+	int yes = 0;
+
+	move_after = 0;
+	if (!move_ok)
+		return;
+	pad_last = pad_fn ? pad_fn() : 0;	/* the Cross that said "Yes" is not an answer here */
+	for (;;)
+	{
+		unsigned p = pressed();
+
+		if (app_events() || (p & PAD_CIRCLE))
+			return;				/* Circle: the originals stay */
+		if (p & (PAD_LEFT | PAD_RIGHT | PAD_UP | PAD_DOWN))
+			yes ^= 1;
+		if (p & PAD_CROSS)
+		{
+			move_after = yes;
+			logf_("delete the original(s) after copying: %s", yes ? "yes" : "no");
+			return;
+		}
+		frame++;
+		backdrop();
+		draw_message(many ? "Delete the originals afterwards?" : "Delete the original afterwards?",
+			yes ? "YES: each copy is read back and compared first. Then the original is deleted for good."
+				: "NO: nothing is deleted. Left or Right changes the answer.",
+			yes ? "Left or Right changes the answer. Circle: no." : "(Yes would read each copy back, compare it, then delete the original.)",
+			"X", yes ? "Copy, check, delete the original" : "Copy and keep the original");
+		gfx_present();
+	}
+}
+
+/* is dst the same as src, byte for byte? 0 = yes; -9 = stopped by Circle; else no */
+static int verify_file(const char *src, const char *dst, u64 size)
+{
+	const char *b = strrchr(src, '/');
+	u8 *b2 = (u8 *)malloc(BUF_SZ);
+	s32 fa = -1, fb = -1;
+	u64 off = 0, t_shown = 0;
+	int r = 0;
+
+	logf_("  read back %s", dst);
+	if (!b2 || !buf || sysFsOpen(src, SYS_O_RDONLY, &fa, NULL, 0) != 0 || sysFsOpen(dst, SYS_O_RDONLY, &fb, NULL, 0) != 0)
+		r = -1;
+	while (!r && off < size)
+	{
+		u32 n = size - off < BUF_SZ ? (u32)(size - off) : BUF_SZ;
+		u64 ra = 0, rb = 0;
+
+		if (sysFsRead(fa, buf, n, &ra) != 0 || sysFsRead(fb, b2, n, &rb) != 0 || ra != n || rb != n)
+			r = -2;
+		else if (memcmp(buf, b2, n))
+			r = -7;
+		off += n;
+		if (!r && tb() - t_shown > TB_HZ / 2)
+		{
+			char ln[120];
+
+			snprintf(ln, sizeof ln, "%s  " "\x7f" "  %.0f of %.0f MB  " "\x7f" "  Circle stops (the original then stays)", b ? b + 1 : src, off / 1e6, size / 1e6);
+			progress(NULL, "CHECKING THE COPY", title, size ? (float)((double)off / (double)size) : 0.0f, ln);
+			t_shown = tb();
+			if ((pressed() & PAD_CIRCLE) || app_events())
+				r = -9;
+		}
+	}
+	if (!r)
+	{
+		/* and neither file goes on past the size that was copied */
+		sysFSStat sa, sb;
+
+		if (sysFsFstat(fa, &sa) != 0 || sysFsFstat(fb, &sb) != 0 || sa.st_size != size || sb.st_size != size)
+			r = -3;
+	}
+	if (fa >= 0)
+		sysFsClose(fa);
+	if (fb >= 0)
+		sysFsClose(fb);
+	free(b2);
+	logf_("  read back ended %d at %llu of %llu", r, (unsigned long long)off, (unsigned long long)size);
+	return r;
+}
+
+/* v0.76 (Bananafuzzbuddy, 11-25: Tiny Tees from the hard disk to the SD card was copied and NOT deleted: a PS2 game
+ * onto a card's FAT32 part goes through copy_to_parts, which had no read-back, so the original was kept).
+ * The same compare for a copy that is one file or name.0, name.1 ... in dir: the pieces are read end to end
+ * against the original, and must end exactly where it ends. 0 = the same; -9 = stopped; else not. */
+static int verify_parts(const char *src, const char *dir, const char *name, u64 size)
+{
+	u8 *b2 = (u8 *)malloc(BUF_SZ);
+	char p[300];
+	sysFSStat st;
+	s32 fa = -1, fb = -1;
+	u64 off = 0, t_shown = 0, g = 0;
+	int r = 0, part = -1;
+
+	snprintf(p, sizeof p, "%s/%s", dir, name);
+	if (sysFsStat(p, &st) != 0 || (st.st_mode & 0170000) == 0040000)
+	{
+		part = 0;
+		snprintf(p, sizeof p, "%s/%s.0", dir, name);
+	}
+	logf_("  read back %s%s", p, part == 0 ? " and the parts after it" : "");
+	if (!b2 || !buf || sysFsOpen(src, SYS_O_RDONLY, &fa, NULL, 0) != 0 || sysFsOpen(p, SYS_O_RDONLY, &fb, NULL, 0) != 0)
+		r = -1;
+	while (!r && off < size)
+	{
+		u32 n = size - off < BUF_SZ ? (u32)(size - off) : BUF_SZ, have = 0;
+		u64 ra = 0;
+
+		if (sysFsRead(fa, buf, n, &ra) != 0 || ra != n)
+			r = -2;
+		while (!r && have < n)
+		{
+			g = 0;
+			if (sysFsRead(fb, b2 + have, n - have, &g) != 0)
+				r = -2;
+			else if (g == 0)
+			{
+				/* this piece is at its end: the next one, if the copy is in parts */
+				if (part < 0)
+					r = -3;
+				else
+				{
+					sysFsClose(fb);
+					fb = -1;
+					snprintf(p, sizeof p, "%s/%s.%d", dir, name, ++part);
+					if (sysFsOpen(p, SYS_O_RDONLY, &fb, NULL, 0) != 0)
+						r = -3;
+				}
+			}
+			else
+				have += (u32)g;
+		}
+		if (!r && memcmp(buf, b2, n))
+			r = -7;
+		off += n;
+		if (!r && tb() - t_shown > TB_HZ / 2)
+		{
+			char ln[120];
+
+			snprintf(ln, sizeof ln, "%s  " "\x7f" "  %.0f of %.0f MB  " "\x7f" "  Circle stops (the original then stays)", name, off / 1e6, size / 1e6);
+			progress(NULL, "CHECKING THE COPY", title, size ? (float)((double)off / (double)size) : 0.0f, ln);
+			t_shown = tb();
+			if ((pressed() & PAD_CIRCLE) || app_events())
+				r = -9;
+		}
+	}
+	if (!r)
+	{
+		/* nothing after the original's last byte: not in this piece, and no piece after it */
+		g = 0;
+		if (fb < 0 || sysFsRead(fb, b2, 1, &g) != 0 || g != 0)
+			r = -3;
+		if (!r && part >= 0)
+		{
+			snprintf(p, sizeof p, "%s/%s.%d", dir, name, part + 1);
+			if (sysFsStat(p, &st) == 0)
+				r = -3;
+		}
+	}
+	if (fa >= 0)
+		sysFsClose(fa);
+	if (fb >= 0)
+		sysFsClose(fb);
+	free(b2);
+	logf_("  read back ended %d at %llu of %llu, %s", r, (unsigned long long)off, (unsigned long long)size, part < 0 ? "one file" : "in parts");
+	return r;
+}
+
+/* v0.76: the same for a file just written into the card's exFAT part: read back through Prism's own card
+ * reader (lr_fs.c, the code the PS2 side plays from), opened fresh, against the original. */
+static int verify_exfat(const char *src, const char *sub, const char *name, u64 size)
+{
+	u8 *b2 = (u8 *)malloc(BUF_SZ);
+	char p[300];
+	s32 fa = -1;
+	u64 off = 0, t_shown = 0, csize = 0;
+	int r = 0, att = 0;
+
+	snprintf(p, sizeof p, "/%s/%s", sub, name);
+	logf_("  read back exFAT %s", p);
+	if (!b2 || !buf || sysFsOpen(src, SYS_O_RDONLY, &fa, NULL, 0) != 0)
+		r = -1;
+	if (!r)
+	{
+		lr_fs_forget();
+		r = fsport_attach(card_dev);
+		att = r == 0;
+		if (r == 0)
+			r = lr_fs_mount();
+		if (r == 0)
+			r = lr_fs_open(p, &csize);
+		if (r == 0 && csize != size)
+			r = -3;
+		if (r)
+			logf_("  the card's copy could not be opened for the read back (%d, %llu bytes)", r, (unsigned long long)csize);
+	}
+	while (!r && off < size)
+	{
+		u32 n = size - off < BUF_SZ ? (u32)(size - off) : BUF_SZ;
+		u64 ra = 0;
+
+		if (sysFsRead(fa, buf, n, &ra) != 0 || ra != n || lr_file_read(off, b2, n))
+			r = -2;
+		else if (memcmp(buf, b2, n))
+			r = -7;
+		off += n;
+		if (!r && tb() - t_shown > TB_HZ / 2)
+		{
+			char ln[120];
+
+			snprintf(ln, sizeof ln, "%s  " "\x7f" "  %.0f of %.0f MB  " "\x7f" "  Circle stops (the original then stays)", name, off / 1e6, size / 1e6);
+			progress(NULL, "CHECKING THE COPY", title, size ? (float)((double)off / (double)size) : 0.0f, ln);
+			t_shown = tb();
+			if ((pressed() & PAD_CIRCLE) || app_events())
+				r = -9;
+		}
+	}
+	if (att)
+		fsport_detach();
+	if (fa >= 0)
+		sysFsClose(fa);
+	free(b2);
+	logf_("  read back ended %d at %llu of %llu", r, (unsigned long long)off, (unsigned long long)size);
+	return r;
+}
+
+/* the copy is made and is the same: the original goes, by manage.c's delete; msg gets a sentence more */
+static void finish_move(int plat, const game_t *g, char *msg, int msg_n)
+{
+	char w[220];
+	size_t l = strlen(msg);
+
+	if (move_unchecked)
+		snprintf(msg + l, msg_n - l, ". The original was KEPT: the check of the copy was stopped");
+	else if (game_del_plan(plat, g, w, sizeof w) == 0 && game_delete(pad_fn, plat, g, w, sizeof w) == 0)
+	{
+		moved_n++;
+		snprintf(msg + l, msg_n - l, ". The original was deleted");
+	}
+	else
+		snprintf(msg + l, msg_n - l, ". The original was kept: %s", w);
+	logf_("move%s", msg + l);
+}
 
 static int copy_file(const char *src, const char *dst, u64 size)
 {
@@ -418,6 +680,8 @@ static void draw_pick(int sel, int asking, int yes)
 			else
 				fit(ln, sizeof ln, F_SMALL, exf_why, 330);
 		}
+		else if (ps2_img && i >= 2 && i <= 9 && ok)
+			snprintf(ln, sizeof ln, "%s free  " "\x7f" "  to keep it, not to play from", a);	/* v0.78 */
 		else if (!devs[i].fat || !bigfile)
 			snprintf(ln, sizeof ln, ok ? "%s free" : "%s free  " "\x7f" "  not enough room", a);
 		else
@@ -525,8 +789,11 @@ static void scan_devs(void)
 			logf_("%s: not offered, the slot gives damaged data (%s)", devs[i].path, slot_cc_why[slot_of_path(devs[i].path)]);
 			devs[i].present = 0;
 		}
-		if (ps2_img && i > 1)
-			devs[i].present = 0;	/* USB drives and the other card slots: PS2 games do not start from them */
+		/* v0.78 (Bananafuzzbuddy, 11-25: "I can't transfer anything to the usb sticks"): a USB drive takes PS2 images too,
+		 * in /PS2ISO, to KEEP them (nothing plays them from there; the picker says so). FAT32: under 4 GB each.
+		 * The other two card slots stay out here: a card is reached through cd_scan / the exFAT writer. */
+		if (ps2_img && (i == 10 || i == 11))
+			devs[i].present = 0;
 		if (!devs[i].present)
 			continue;
 		logf_("free space on %s", devs[i].path);
@@ -563,7 +830,10 @@ static int choose(void)
 			else if (p & PAD_CROSS)
 			{
 				if (yes)
+				{
+					ask_move(pick_many);	/* v0.75 */
 					return sel;
+				}
 				asking = 0;
 			}
 		}
@@ -605,6 +875,7 @@ int rip_disc(unsigned (*pad)(void), char *msg, int msg_n)
 	first_bad[0] = 0;
 	t0 = tb();
 	logf_("=== copy disc, app v%s", APP_VERSION);
+	move_ok = move_after = 0;	/* v0.75: a disc is not deleted */
 	pick_head = "COPY DISC";
 	snprintf(dest_sub, sizeof dest_sub, "GAMES");
 	src_dev = -1;
@@ -1072,6 +1343,513 @@ static int where_dev(int where)
  * on the exFAT part, in /PS2PRISM or split into .0/.1 parts arrives as ONE file in /dev_hdd0/PS2ISO,
  * where webMAN and Prism both play it. Written as <name>.part and renamed when whole: a stopped or
  * failed copy never shows up as a game. The card is only read. */
+/* ---- v0.77 (Bananafuzzbuddy, 11-25: marked games on the Memory Stick could go to the hard disk only, not to the SD
+ * card): a PS2 game on a card read by Prism can be copied to the hard disk, to another card's FAT32 part
+ * (/PS2PRISM, one file, so under 4 GB) or to another card's exFAT part (/PS2ISO, by exfat_w.c). The card it
+ * is on is never offered, and a slot that failed the damage check is neither read nor written. ---- */
+#define CD_HDD	0
+#define CD_FAT	1
+#define CD_EXF	2
+typedef struct
+{
+	int kind, slot;
+	char name[44], dir[44], root[16];
+	u64 free;
+} cdest_t;
+static cdest_t cdl[16], cd_to;	/* v0.78: the USB drives too */
+static int n_cdl;
+
+static void cd_hdd(cdest_t *c)
+{
+	u32 bs = 0;
+	u64 fb = 0;
+
+	memset(c, 0, sizeof *c);
+	c->kind = CD_HDD;
+	c->slot = -1;
+	snprintf(c->name, sizeof c->name, "the hard disk");
+	snprintf(c->dir, sizeof c->dir, "/dev_hdd0/PS2ISO");
+	snprintf(c->root, sizeof c->root, "/dev_hdd0");
+	if (sysFsGetFreeSize("/dev_hdd0", &bs, &fb) == 0)
+		c->free = (u64)bs * fb;
+}
+
+/* not_slot: the card the game is on (-1: games from several cards; each is checked when its turn comes) */
+static void cd_scan(int not_slot)
+{
+	static const char *const mnt[3] = { "/dev_ms", "/dev_sd", "/dev_cf" };
+	int s;
+
+	n_cdl = 0;
+	cd_hdd(&cdl[n_cdl++]);
+	for (s = 0; s < 3; s++)
+	{
+		if (slot_cc[s] != CC_OK || s == not_slot)
+			continue;
+		if (is_dir(mnt[s]))
+		{
+			cdest_t *c = &cdl[n_cdl++];
+			u32 bs = 0;
+			u64 fb = 0;
+
+			memset(c, 0, sizeof *c);
+			c->kind = CD_FAT;
+			c->slot = s;
+			snprintf(c->name, sizeof c->name, "the %s card (FAT32 part)", slot_name(s));
+			snprintf(c->dir, sizeof c->dir, "%s/" PS2_FAT_DIR, mnt[s]);
+			snprintf(c->root, sizeof c->root, "%s", mnt[s]);
+			if (sysFsGetFreeSize(mnt[s], &bs, &fb) == 0)
+				c->free = (u64)bs * fb;
+		}
+		{
+			u64 was = card_dev;
+			exw_dev dv;
+			uint64_t fr = 0, tot = 0;
+			char why[120];
+
+			card_dev = slot_storage(s);
+			if (exc_open(&dv, why, sizeof why) == 0)
+			{
+				if (exw_space(&dv, &fr, &tot, why, sizeof why) == 0)
+				{
+					cdest_t *c = &cdl[n_cdl++];
+
+					memset(c, 0, sizeof *c);
+					c->kind = CD_EXF;
+					c->slot = s;
+					snprintf(c->name, sizeof c->name, "the %s card (exFAT part)", slot_name(s));
+					snprintf(c->dir, sizeof c->dir, "PS2ISO");
+					c->free = fr;
+				}
+				exc_close();
+			}
+			card_dev = was;
+		}
+	}
+	for (s = 0; s < 8 && n_cdl < 15; s++)
+	{
+		/* v0.78: a USB drive (FAT32, mounted by the system): /PS2ISO, one file, so under 4 GB */
+		char mp[16];
+		cdest_t *c;
+		u32 bs = 0;
+		u64 fb = 0;
+
+		snprintf(mp, sizeof mp, "/dev_usb%03d", s);
+		if (!is_dir(mp))
+			continue;
+		c = &cdl[n_cdl++];
+		memset(c, 0, sizeof *c);
+		c->kind = CD_FAT;
+		c->slot = -1;
+		snprintf(c->name, sizeof c->name, "the USB %d drive", s);
+		snprintf(c->dir, sizeof c->dir, "%s/PS2ISO", mp);
+		snprintf(c->root, sizeof c->root, "%s", mp);
+		if (sysFsGetFreeSize(mp, &bs, &fb) == 0)
+			c->free = (u64)bs * fb;
+	}
+	for (s = 0; s < n_cdl; s++)
+		logf_("card game target: %s, %llu MB free", cdl[s].name, (unsigned long long)(cdl[s].free >> 20));
+}
+
+/* can target i take need bytes, the biggest single file being big? why[] says why not */
+static int cd_fits(int i, u64 need, u64 big, char *why, int wn)
+{
+	why[0] = 0;
+	if (cdl[i].kind == CD_FAT && big >= 0xFFFFFFFFull && cdl[i].slot < 0)
+		snprintf(why, wn, "a game is over 4 GB: FAT32 cannot hold it");
+	else if (cdl[i].kind == CD_FAT && big >= 0xFFFFFFFFull)
+		snprintf(why, wn, "a game is over 4 GB: FAT32 holds it only in parts (copy it to the hard disk first)");
+	else if (cdl[i].free < need + (cdl[i].kind == CD_EXF ? 0 : (64ull << 20)))
+		snprintf(why, wn, "not enough room");
+	return !why[0];
+}
+
+/* 1 = cd_to is chosen; 0 = backed out */
+static int cd_choose(const char *what, u64 need, u64 big, int many)
+{
+	int sel = 0, i;
+
+	pad_last = pad_fn ? pad_fn() : 0;
+	for (;;)
+	{
+		unsigned p = pressed();
+		char ln[200], a[32], why[100];
+		int y = 130, step = n_cdl > 7 ? 24 : 30;	/* v0.78: with USB drives in, up to ten lines */
+
+		if (app_events() || (p & PAD_CIRCLE))
+			return 0;
+		if (p & PAD_UP)
+			sel = sel ? sel - 1 : n_cdl - 1;
+		if (p & PAD_DOWN)
+			sel = sel < n_cdl - 1 ? sel + 1 : 0;
+		if ((p & PAD_CROSS) && cd_fits(sel, need, big, why, sizeof why))
+		{
+			cd_to = cdl[sel];
+			logf_("card game target chosen: %s", cd_to.name);
+			return 1;
+		}
+		frame++;
+		backdrop();
+		top_bar(many ? "COPY GAMES" : "COPY GAME");
+		fmt_size(a, sizeof a, need);
+		{
+			char raw[200];
+
+			snprintf(raw, sizeof raw, "%s  " "\x7f" "  %s", what, a);
+			fit(ln, sizeof ln, F_SMALL, raw, RIGHT - LEFT);
+		}
+		text_centre(F_SMALL, 320, 84, 1, DIM, ln);
+		text_centre(F_BODY, 320, 100, 0, INK, many ? "Copy them to where?" : "Copy it to where?");
+		for (i = 0; i < n_cdl; i++)
+		{
+			int ok = cd_fits(i, need, big, why, sizeof why);
+			char nm[48];
+
+			if (i == sel)
+			{
+				rect(LEFT, (float)y - 4.0f, RIGHT, (float)y + (step < 30 ? 19.0f : 22.0f), RGBA(0x7F, 0xE3, 0xFF, 0x1C));
+				frame_rect(LEFT, (float)y - 4.0f, RIGHT, (float)y + (step < 30 ? 19.0f : 22.0f), 1.0f, GLOW);
+			}
+			/* "the hard disk" -> "Hard disk" */
+			snprintf(nm, sizeof nm, "%s", cdl[i].name + 4);
+			if (nm[0] >= 'a' && nm[0] <= 'z')
+				nm[0] = (char)(nm[0] - 32);
+			text(F_BODY, LEFT + 12, y, ok ? (i == sel ? INK : DIM) : FAINT, nm);
+			fmt_size(a, sizeof a, cdl[i].free);
+			if (ok)
+				snprintf(ln, sizeof ln, "%s free", a);
+			else
+				fit(ln, sizeof ln, F_SMALL, why, 300);
+			text_ex(F_SMALL, RIGHT - 12 - text_w(F_SMALL, ln, 1), y + 3, 1.0f, 1, ok ? DIM : FAINT, ln);
+			y += step;
+		}
+		if (y + 10 < 372)
+		text_centre(F_SMALL, 320, y + 10, 0, FAINT, many ? "They stay where they are too, unless you say otherwise next." : "It stays where it is too, unless you say otherwise next.");
+		legend_line();
+		{
+			int x = legend_item(LEFT, 0, NULL, "Choose");
+
+			legend_item(x, 3, NULL, "Back");
+		}
+		gfx_present();
+	}
+}
+
+static u64 fnv64(u64 h, const u8 *b, u32 n)	/* (declared above, for card_sum) */
+{
+	u32 i;
+
+	for (i = 0; i < n; i++)
+		h = (h ^ b[i]) * 0x100000001B3ull;
+	return h;
+}
+
+/* ---- v0.78: "already there" when the original is to be deleted (Bananafuzzbuddy, 11-25: two Tiny Tees marked, one on
+ * each card, to the hard disk with delete: the second was skipped as already there and stayed on its card) ----
+ * The copy that is already there was not made now, so it is compared with the original first, whole: the
+ * same -> the original may go, as after a copy; different, unreadable or stopped -> everything stays. */
+
+/* a card game against a file on a mounted device. 0 the same, -9 stopped, else not the same / not read */
+static int same_on_card(const game_t *g, const char *file, u64 fsize)
+{
+	u8 *a = (u8 *)malloc(BUF_SZ), *b = (u8 *)malloc(BUF_SZ);
+	s32 in = -1;
+	u64 size = 0, off, t_s = 0;
+	int r;
+
+	lr_fs_forget();
+	r = fsport_attach(slot_storage(g->slot));
+	if (r == 0)
+		r = lr_fs_mount();
+	if (r == 0)
+		r = lr_fs_open(g->path, &size);
+	if (r == 0 && (!size || size != fsize))
+		r = -7;
+	if (r == 0 && (!a || !b || sysFsOpen(file, SYS_O_RDONLY, &in, NULL, 0) != 0))
+		r = -1;
+	for (off = 0; off < size && !r; )
+	{
+		u32 n = size - off < BUF_SZ ? (u32)(size - off) : BUF_SZ;
+		u64 got = 0;
+
+		if (lr_file_read(off, a, n))
+			r = -6;
+		else if (sysFsRead(in, b, n, &got) != 0 || got != n || memcmp(a, b, n))
+			r = -7;
+		off += n;
+		if (!r && tb() - t_s > TB_HZ / 2)
+		{
+			char ln[120];
+
+			snprintf(ln, sizeof ln, "%.0f of %.0f MB  " "\x7f" "  Circle stops (nothing is deleted then)", off / 1e6, size / 1e6);
+			progress(NULL, "CHECKING THE COPY ALREADY THERE", title, (float)((double)off / (double)size), ln);
+			t_s = tb();
+			if ((pressed() & PAD_CIRCLE) || app_events())
+			{
+				stop = 1;
+				r = -9;
+			}
+		}
+	}
+	if (in >= 0)
+		sysFsClose(in);
+	fsport_detach();
+	lr_fs_forget();
+	free(a);
+	free(b);
+	logf_("already there, compared with the card: %d (%llu against %llu bytes)", r, (unsigned long long)size, (unsigned long long)fsize);
+	return r;
+}
+
+static u64 fnv64(u64 h, const u8 *b, u32 n);
+
+/* a file on a card, read whole through the card reader and summed (FNV-1a). 0 = *sum and *size hold it */
+static int card_sum(int slot, const char *path, u64 *size, u64 *sum)
+{
+	u8 *b = (u8 *)malloc(BUF_SZ);
+	u64 off, t_s = 0, h = 0xCBF29CE484222325ull;
+	int r;
+
+	*size = 0;
+	lr_fs_forget();
+	r = fsport_attach(slot_storage(slot));
+	if (r == 0)
+		r = lr_fs_mount();
+	if (r == 0)
+		r = lr_fs_open(path, size);
+	if (r == 0 && (!*size || !b))
+		r = -1;
+	for (off = 0; off < *size && !r; )
+	{
+		u32 n = *size - off < BUF_SZ ? (u32)(*size - off) : BUF_SZ;
+
+		if (lr_file_read(off, b, n))
+			r = -6;
+		else
+			h = fnv64(h, b, n);
+		off += n;
+		if (!r && tb() - t_s > TB_HZ / 2)
+		{
+			char ln[120];
+
+			snprintf(ln, sizeof ln, "%s card: %.0f of %.0f MB  " "\x7f" "  Circle stops (nothing is deleted then)", slot_name(slot), off / 1e6, *size / 1e6);
+			progress(NULL, "CHECKING THE COPY ALREADY THERE", title, (float)((double)off / (double)*size), ln);
+			t_s = tb();
+			if ((pressed() & PAD_CIRCLE) || app_events())
+			{
+				stop = 1;
+				r = -9;
+			}
+		}
+	}
+	fsport_detach();
+	lr_fs_forget();
+	free(b);
+	*sum = h;
+	return r;
+}
+
+/* what the comparison found, said; the original goes when it was the same */
+static void already_there(const game_t *g, int v, char *msg, int msg_n)
+{
+	last_result = 2;
+	if (v == 0)
+	{
+		snprintf(msg, msg_n, "%s was already on %s, and the copy there is the same", g->shown, cd_to.name);
+		finish_move(P_PS2, g, msg, msg_n);
+	}
+	else if (v == -9)
+		snprintf(msg, msg_n, "%s is already on %s. The check of that copy was stopped: the original stays", g->shown, cd_to.name);
+	else if (v == -7)
+		snprintf(msg, msg_n, "%s: a DIFFERENT file of that name is on %s. Nothing copied, the original stays", g->shown, cd_to.name);
+	else
+		snprintf(msg, msg_n, "%s is already on %s, but the two could not be compared (%d): the original stays", g->shown, cd_to.name, v);
+}
+
+/* a card game onto ANOTHER card's exFAT part. Read through the card reader from its own slot, written by
+ * exfat_w.c into the other slot. When the original is to be deleted afterwards, every byte read is summed
+ * (FNV-1a, 64 bit) and the new file is read back whole through the card reader and summed again. */
+static int copy_card_exfat(const game_t *g, char *msg, int msg_n)
+{
+	const char *base = strrchr(g->path, '/');
+	char why[200], p[300];
+	u64 size = 0, off, last = 0, was = card_dev, h1 = 0xCBF29CE484222325ull, h2 = 0xCBF29CE484222325ull;
+	exw_dev dv;
+	int r, open2 = 0;
+
+	base = base ? base + 1 : g->path;
+	logf_("=== copy card PS2 game, app v%s: %s (slot %s) -> exFAT part of slot %s", APP_VERSION, g->path, slot_name(g->slot), slot_name(cd_to.slot));
+	progress(NULL, "ONE MOMENT", title, 0.2f, "Opening the game on the card");
+	r = fsport_attach(slot_storage(g->slot));
+	if (r == 0)
+		r = lr_fs_mount();
+	if (r == 0)
+		r = lr_fs_open(g->path, &size);
+	if (r || !size)
+	{
+		fsport_detach();
+		snprintf(msg, msg_n, "Could not open the game on the %s card (%d)", slot_name(g->slot), r);
+		return 0;
+	}
+	total = size;
+	nfiles = 1;
+	why[0] = 0;
+	card_dev = slot_storage(cd_to.slot);
+	r = exc_open(&dv, why, sizeof why);
+	card_dev = was;
+	open2 = r == 0;
+	if (r == 0)
+	{
+		r = exw_begin(&dv, "PS2ISO", base, size, why, sizeof why);
+		if (r && !strcmp(why, "the folder is not on the card's exFAT part"))
+		{
+			/* no PS2ISO folder there yet */
+			r = exw_mkdir(&dv, "PS2ISO", why, sizeof why);
+			logf_("  made the folder PS2ISO: %d (%s)", r, why);
+			if (r == 0)
+				r = exw_begin(&dv, "PS2ISO", base, size, why, sizeof why);
+		}
+	}
+	if (r)
+	{
+		if (open2)
+			exc_close();
+		fsport_detach();
+		if (!strcmp(why, "a file with that name is already there") && move_after)
+		{
+			/* v0.78: both read whole through the card reader and summed */
+			u64 s1 = 0, s2 = 0, z1 = 0, z2 = 0;
+			int v;
+
+			snprintf(p, sizeof p, "/PS2ISO/%s", base);
+			v = card_sum(g->slot, g->path, &z1, &s1);
+			if (v == 0)
+				v = card_sum(cd_to.slot, p, &z2, &s2);
+			if (v == 0 && (z1 != z2 || s1 != s2))
+				v = -7;
+			logf_("already there, sums %016llx %016llx, sizes %llu %llu: %d", (unsigned long long)s1, (unsigned long long)s2,
+				(unsigned long long)z1, (unsigned long long)z2, v);
+			already_there(g, v, msg, msg_n);
+		}
+		else if (!strcmp(why, "a file with that name is already there"))
+		{
+			snprintf(msg, msg_n, "%s is already on %s", g->shown, cd_to.name);
+			last_result = 2;
+		}
+		else
+			snprintf(msg, msg_n, "Not copied to %s: %s", cd_to.name, why);
+		return 0;
+	}
+	buf = (u8 *)malloc(BUF_SZ);
+	if (!buf)
+	{
+		exw_abort();
+		exc_close();
+		fsport_detach();
+		snprintf(msg, msg_n, "Out of memory");
+		return 0;
+	}
+	show_head = "COPYING TO THE CARD";
+	t0 = tb();
+	show("starting");
+	for (off = 0; off < size && !r; )
+	{
+		u32 n = size - off < BUF_SZ ? (u32)(size - off) : BUF_SZ;
+
+		if (lr_file_read(off, buf, n))
+			r = -6;
+		else if (exw_write(buf, n))
+			r = -3;
+		else if (move_after)
+			h1 = fnv64(h1, buf, n);
+		off += n;
+		done = off;
+		if (!r && (done - last >= (4u << 20) || tb() - t_shown > TB_HZ / 2))
+		{
+			show(base);
+			t_shown = tb();
+			last = done;
+			if ((pressed() & PAD_CIRCLE) || app_events())
+			{
+				stop = 1;
+				r = -9;
+			}
+		}
+	}
+	fsport_detach();
+	if (!r && exw_finish(why, sizeof why))
+		r = -4;
+	else if (r)
+		exw_abort();
+	exc_close();
+	lr_fs_forget();
+	logf_("card to exFAT copy ended %d (%s): %llu of %llu bytes", r, why, (unsigned long long)done, (unsigned long long)total);
+	if (!r && move_after)
+	{
+		/* the new file, read back from its card through the card reader */
+		u64 csize = 0, t_s = 0;
+		int v;
+
+		snprintf(p, sizeof p, "/PS2ISO/%s", base);
+		v = fsport_attach(slot_storage(cd_to.slot));
+		if (v == 0)
+			v = lr_fs_mount();
+		if (v == 0)
+			v = lr_fs_open(p, &csize);
+		if (v == 0 && csize != size)
+			v = -3;
+		for (off = 0; off < size && !v; )
+		{
+			u32 n = size - off < BUF_SZ ? (u32)(size - off) : BUF_SZ;
+
+			if (lr_file_read(off, buf, n))
+				v = -6;
+			else
+				h2 = fnv64(h2, buf, n);
+			off += n;
+			if (!v && tb() - t_s > TB_HZ / 2)
+			{
+				char ln[120];
+
+				snprintf(ln, sizeof ln, "%.0f of %.0f MB  " "\x7f" "  Circle stops (nothing is deleted then)", off / 1e6, size / 1e6);
+				progress(NULL, "CHECKING THE COPY", title, (float)((double)off / (double)size), ln);
+				t_s = tb();
+				if ((pressed() & PAD_CIRCLE) || app_events())
+					v = -9;
+			}
+		}
+		fsport_detach();
+		lr_fs_forget();
+		logf_("card to exFAT read back: %d, sums %016llx %016llx", v, (unsigned long long)h1, (unsigned long long)h2);
+		if (v == -9)
+			move_unchecked = 1;
+		else if (v || h1 != h2)
+		{
+			verify_bad = 1;
+			r = -7;
+		}
+	}
+	free(buf);
+	buf = NULL;
+	show_head = "COPYING THE DISC";
+	if (r == -7)
+		snprintf(msg, msg_n, "The copy on %s did not read back the same as the original. Do not use that copy; the original stays", cd_to.name);
+	else if (r == -9)
+		snprintf(msg, msg_n, "Stopped: nothing was added to %s", cd_to.name);
+	else if (r)
+		snprintf(msg, msg_n, "The copy stopped at %.0f MB (%s, %d): nothing was added to %s", done / 1e6, r == -6 ? "card read" : why[0] ? why : "card write", r, cd_to.name);
+	else
+	{
+		double secs = (double)(tb() - t0) / TB_HZ;
+
+		snprintf(msg, msg_n, "%s copied to %s: %.0f MB in %d:%02d", g->shown, cd_to.name, total / 1e6, (int)secs / 60, (int)secs % 60);
+		last_result = 1;
+		if (move_after)
+			finish_move(P_PS2, g, msg, msg_n);
+	}
+	return 0;
+}
+
 static int copy_card_ps2(const game_t *g, char *msg, int msg_n)
 {
 	const char *base = strrchr(g->path, '/');
@@ -1082,7 +1860,19 @@ static int copy_card_ps2(const game_t *g, char *msg, int msg_n)
 	int r;
 
 	base = base ? base + 1 : g->path;
-	snprintf(dst, sizeof dst, "/dev_hdd0/PS2ISO/%s", base);
+	if (cd_to.kind != CD_HDD && cd_to.kind != CD_FAT && cd_to.kind != CD_EXF)
+		cd_hdd(&cd_to);
+	if (!cd_to.dir[0])
+		cd_hdd(&cd_to);		/* v0.77: nothing chosen: the hard disk, as before */
+	if (cd_to.kind != CD_HDD && cd_to.slot == g->slot)
+	{
+		snprintf(msg, msg_n, "%s is on that card already", g->shown);
+		last_result = 2;
+		return 0;
+	}
+	if (cd_to.kind == CD_EXF)
+		return copy_card_exfat(g, msg, msg_n);
+	snprintf(dst, sizeof dst, "%s/%s", cd_to.dir, base);
 	snprintf(part, sizeof part, "%s.part", dst);
 	logf_("=== copy card PS2 game, app v%s: %s -> %s", APP_VERSION, g->path, dst);
 	{
@@ -1090,12 +1880,16 @@ static int copy_card_ps2(const game_t *g, char *msg, int msg_n)
 
 		if (sysFsStat(dst, &st) == 0)
 		{
-			snprintf(msg, msg_n, "%s is already on the hard disk", g->shown);
+			if (move_after && (st.st_mode & 0170000) != 0040000)
+				already_there(g, same_on_card(g, dst, st.st_size), msg, msg_n);	/* v0.78 */
+			else
+				snprintf(msg, msg_n, "%s is already on %s", g->shown, cd_to.name);
 			last_result = 2;
 			return 0;
 		}
 	}
 	progress(NULL, "ONE MOMENT", title, 0.2f, "Opening the game on the card");
+	lr_fs_forget();		/* v0.78: the game before this one may have been on another card */
 	r = fsport_attach(slot_storage(g->slot));	/* v0.66: the game's own slot (v0.63: the one card's slot) */
 	if (r == 0)
 		r = lr_fs_mount();
@@ -1109,15 +1903,24 @@ static int copy_card_ps2(const game_t *g, char *msg, int msg_n)
 	}
 	total = size;
 	nfiles = 1;
-	if (sysFsGetFreeSize("/dev_hdd0", &bs, &freeb) == 0 && (u64)bs * freeb < size + (64ull << 20))
+	if (cd_to.kind == CD_FAT && size >= 0xFFFFFFFFull)
 	{
 		fsport_detach();
-		snprintf(msg, msg_n, "Not enough room on the hard disk: %.1f GB needed, %.1f GB free", size / 1073741824.0,
+		if (cd_to.slot < 0)
+			snprintf(msg, msg_n, "%s is over 4 GB: a FAT32 USB drive cannot hold it", g->shown);	/* v0.78 */
+		else
+		snprintf(msg, msg_n, "%s is over 4 GB: FAT32 holds it only in parts. Copy it to the hard disk first, then from there to the card", g->shown);
+		return 0;
+	}
+	if (sysFsGetFreeSize(cd_to.root, &bs, &freeb) == 0 && (u64)bs * freeb < size + (64ull << 20))
+	{
+		fsport_detach();
+		snprintf(msg, msg_n, "Not enough room on %s: %.1f GB needed, %.1f GB free", cd_to.name, size / 1073741824.0,
 			(double)bs * freeb / 1073741824.0);
 		return 0;
 	}
 	buf = (u8 *)malloc(BUF_SZ);
-	sysFsMkdir("/dev_hdd0/PS2ISO", 0777);
+	sysFsMkdir(cd_to.dir, 0777);
 	if (!buf || sysFsOpen(part, SYS_O_WRONLY | SYS_O_CREAT | SYS_O_TRUNC, &out, NULL, 0) != 0)
 	{
 		int nomem = !buf;
@@ -1125,11 +1928,11 @@ static int copy_card_ps2(const game_t *g, char *msg, int msg_n)
 		fsport_detach();
 		free(buf);
 		buf = NULL;
-		snprintf(msg, msg_n, nomem ? "Out of memory" : "Could not write to the hard disk");
+		snprintf(msg, msg_n, nomem ? "Out of memory" : "Could not write to %s", cd_to.name);
 		return 0;
 	}
 	sysFsChmod(part, 0777);
-	show_head = "COPYING TO THE HARD DISK";
+	show_head = cd_to.kind == CD_HDD ? "COPYING TO THE HARD DISK" : cd_to.slot < 0 ? "COPYING TO THE USB DRIVE" : "COPYING TO THE CARD";
 	t0 = tb();
 	show("starting");
 	for (off = 0; off < size && !r; )
@@ -1156,6 +1959,46 @@ static int copy_card_ps2(const game_t *g, char *msg, int msg_n)
 		}
 	}
 	sysFsClose(out);
+	if (!r && move_after)
+	{
+		/* v0.75: the card is still open: the copy on the hard disk is read back against it */
+		u8 *b2 = (u8 *)malloc(BUF_SZ);
+		s32 in = -1;
+		u64 t_s = 0;
+
+		if (!b2 || sysFsOpen(part, SYS_O_RDONLY, &in, NULL, 0) != 0)
+			r = -7;
+		for (off = 0; off < size && !r; )
+		{
+			u32 n = size - off < BUF_SZ ? (u32)(size - off) : BUF_SZ;
+			u64 got = 0;
+
+			if (lr_file_read(off, buf, n))
+				r = -6;
+			else if (sysFsRead(in, b2, n, &got) != 0 || got != n || memcmp(buf, b2, n))
+				r = -7;
+			off += n;
+			if (!r && tb() - t_s > TB_HZ / 2)
+			{
+				char ln[120];
+
+				snprintf(ln, sizeof ln, "%.0f of %.0f MB  " "\x7f" "  Circle stops (nothing is deleted then)", off / 1e6, size / 1e6);
+				progress(NULL, "CHECKING THE COPY", title, (float)((double)off / (double)size), ln);
+				t_s = tb();
+				if ((pressed() & PAD_CIRCLE) || app_events())
+				{
+					stop = 1;
+					r = -9;
+				}
+			}
+		}
+		if (in >= 0)
+			sysFsClose(in);
+		free(b2);
+		if (r == -7)
+			verify_bad = 1;
+		logf_("card copy read back: %d", r);
+	}
 	fsport_detach();
 	free(buf);
 	buf = NULL;
@@ -1167,16 +2010,22 @@ static int copy_card_ps2(const game_t *g, char *msg, int msg_n)
 	{
 		sysFsUnlink(part);
 		if (r == -9)
-			snprintf(msg, msg_n, "Stopped: nothing kept on the hard disk");
+			snprintf(msg, msg_n, "Stopped: nothing kept on %s", cd_to.name);
+		else if (r == -7)
+			snprintf(msg, msg_n, "The copy on %s did not read back the same as the card: nothing kept, the original stays", cd_to.name);
 		else
-			snprintf(msg, msg_n, "The copy stopped at %.0f MB (%s, %d): nothing kept", done / 1e6, r == -6 ? "card read" : "disk write", r);
+			snprintf(msg, msg_n, "The copy stopped at %.0f MB (%s, %d): nothing kept", done / 1e6, r == -6 ? "card read" : "write", r);
 	}
 	else
 	{
 		double secs = (double)(tb() - t0) / TB_HZ;
 
-		snprintf(msg, msg_n, "%s copied to the hard disk: %.0f MB in %d:%02d", g->shown, total / 1e6, (int)secs / 60, (int)secs % 60);
+		snprintf(msg, msg_n, "%s copied to %s: %.0f MB in %d:%02d", g->shown, cd_to.name, total / 1e6, (int)secs / 60, (int)secs % 60);
 		last_result = 1;
+		if (move_after)
+		{
+			finish_move(P_PS2, g, msg, msg_n);	/* v0.75 */
+		}
 	}
 	return 0;
 }
@@ -1203,6 +2052,27 @@ int copy_game(unsigned (*pad)(void), int plat, const game_t *g, char *msg, int m
 			snprintf(title, sizeof title, "%d of %d: %s", batch_k, batch_n, g->shown);	/* v0.67 */
 		else
 			snprintf(title, sizeof title, "%s", g->shown);
+		if (!batch_n)
+		{
+			/* v0.77: a single card game: where to (the hard disk, another card), then v0.75's question
+			 * (a batch asked both once, in copy_games) */
+			move_ok = 1;
+			moved_n = 0;
+			move_after = 0;
+			cd_scan(g->slot);
+			if (n_cdl > 1)
+			{
+				if (!cd_choose(g->shown, g->size, g->size, 0))
+				{
+					snprintf(msg, msg_n, "Nothing copied");
+					return 0;
+				}
+			}
+			else
+				cd_to = cdl[0];
+			ask_move(0);
+		}
+		move_unchecked = verify_bad = 0;
 		pad_last = pad_fn ? pad_fn() : 0;	/* the X that chose this is not a Circle */
 		r = copy_card_ps2(g, msg, msg_n);
 		logf_("result: %s", msg);
@@ -1214,6 +2084,12 @@ int copy_game(unsigned (*pad)(void), int plat, const game_t *g, char *msg, int m
 	first_bad[0] = 0;
 	t0 = tb();
 	logf_("=== copy game, app v%s: %s", APP_VERSION, g->path);
+	if (!batch_n)
+	{
+		move_ok = 1;	/* v0.75: asked in choose(), after the "Yes" */
+		move_after = moved_n = 0;
+	}
+	move_unchecked = verify_bad = 0;
 	pick_head = "COPY GAME";
 	src_dev = where_dev(g->where);
 	if (batch_n)
@@ -1222,7 +2098,7 @@ int copy_game(unsigned (*pad)(void), int plat, const game_t *g, char *msg, int m
 		snprintf(title, sizeof title, "%s", g->shown);
 	snprintf(tid, sizeof tid, "%s", g->id[0] ? g->id : "-");
 	base = base ? base + 1 : g->path;
-	if ((plat == P_PS2 && g->where != 2) || g->kind >= 4)
+	if ((plat == P_PS2 && g->where == 1) || g->kind >= 4)	/* v0.78: PS2 games on a USB drive go this way too */
 	{
 		snprintf(msg, msg_n, "Only PS1, PSP and PS3 games, and PS2 games on the hard disk, are copied this way");
 		goto out;
@@ -1334,15 +2210,57 @@ int copy_game(unsigned (*pad)(void), int plat, const game_t *g, char *msg, int m
 			{
 				snprintf(dest_name, sizeof dest_name, "%s", b ? b + 1 : flist[i]);
 				r = copy_to_exfat(flist[i], st.st_size);
+				if (!r && !stop && move_after)
+				{
+					/* v0.76: read back through the card reader */
+					int v = verify_exfat(flist[i], dest_sub, dest_name, st.st_size);
+
+					if (v == -9)
+						move_unchecked = 1;
+					else if (v)
+					{
+						verify_bad = 1;		/* the copy stays for a look; the original stays too */
+						r = -7;
+					}
+				}
 			}
 			else if (ps2_img && d == 0)
 			{
 				/* the card's FAT32 part: /PS2PRISM, in parts when it is over 4 GiB */
 				snprintf(dst, sizeof dst, "%s/%s", devs[d].path, PS2_FAT_DIR);
 				r = copy_to_parts(flist[i], dst, b ? b + 1 : flist[i], st.st_size);
+				if (!r && !stop && move_after)
+				{
+					/* v0.76: the file, or its parts end to end, against the original */
+					int v = verify_parts(flist[i], dst, b ? b + 1 : flist[i], st.st_size);
+
+					if (v == -9)
+						move_unchecked = 1;
+					else if (v)
+					{
+						verify_bad = 1;
+						r = -7;
+					}
+				}
 			}
 			else
+			{
 				r = copy_file(flist[i], dst, st.st_size);
+				if (!r && !stop && move_after)
+				{
+					/* v0.75: the copy is read back against the original before the original may go */
+					int v = verify_file(flist[i], dst, st.st_size);
+
+					if (v == -9)
+						move_unchecked = 1;	/* stopped: the copy stays, so does the original */
+					else if (v)
+					{
+						verify_bad = 1;
+						sysFsUnlink(dst);
+						r = -7;
+					}
+				}
+			}
 			if (!r && stop)
 				r = -9;
 			if (r && r != -9)
@@ -1355,6 +2273,8 @@ int copy_game(unsigned (*pad)(void), int plat, const game_t *g, char *msg, int m
 		snprintf(msg, msg_n, "Stopped: nothing kept on the card");
 	else if (stop)
 		snprintf(msg, msg_n, "Stopped: the copy on %s is only part of the game", devs[d].name);
+	else if (r && verify_bad)
+		snprintf(msg, msg_n, "The copy on %s did not read back the same as the original (%s). Do not use that copy; the original stays", devs[d].name, first_bad);
 	else if (r && link_hit)
 		snprintf(msg, msg_n, "PPSSPP opened this game from the card, and its name on the hard disk is held until the console restarts. Restart the console, then copy it");
 	else if (r)
@@ -1365,6 +2285,8 @@ int copy_game(unsigned (*pad)(void), int plat, const game_t *g, char *msg, int m
 
 		snprintf(msg, msg_n, "%s copied to %s: %.0f MB in %d:%02d", title, devs[d].name, total / 1e6, (int)secs / 60, (int)secs % 60);
 		last_result = 1;
+		if (move_after)
+			finish_move(plat, g, msg, msg_n);	/* v0.75 */
 	}
 out:
 	logf_("result: %s", msg);
@@ -1419,6 +2341,8 @@ int copy_games(unsigned (*pad)(void), int plat, const game_t *list, int n, char 
 		return -1;
 	}
 	pad_fn = pad;
+	move_ok = 1;	/* v0.75: asked once for the whole batch (choose(), or after ask_hdd) */
+	move_after = moved_n = 0;
 	for (k = 0; k < n; k++)
 	{
 		if (plat == P_PS2 && list[k].where == 1 && list[k].kind < 4)
@@ -1439,20 +2363,42 @@ int copy_games(unsigned (*pad)(void), int plat, const game_t *list, int n, char 
 
 		for (k = 0; k < n; k++)
 			sum += list[k].size;
-		if (sysFsGetFreeSize("/dev_hdd0", &bs, &freeb) != 0)
-			freeb = 0;
-		freeb *= bs;
-		if (freeb < sum + (64ull << 20))
+		for (k = 0; k < n; k++)
+			if (list[k].size > biggest)
+				biggest = list[k].size;
+		/* v0.77: where to. With no other card in, the hard disk and its one question, as before */
+		cd_scan(-1);
+		if (n_cdl > 1)
 		{
-			snprintf(msg, msg_n, "Nothing copied: not enough room on the hard disk, %.1f GB needed, %.1f GB free", sum / 1073741824.0, freeb / 1073741824.0);
-			return -1;
+			char what[60];
+
+			snprintf(what, sizeof what, "%d marked games", n);
+			if (!cd_choose(what, sum, biggest, 1))
+			{
+				snprintf(msg, msg_n, "Nothing copied");
+				return -1;
+			}
 		}
-		if (!ask_hdd(n, sum, freeb))
+		else
 		{
-			snprintf(msg, msg_n, "Nothing copied");
-			return -1;
+			if (sysFsGetFreeSize("/dev_hdd0", &bs, &freeb) != 0)
+				freeb = 0;
+			freeb *= bs;
+			if (freeb < sum + (64ull << 20))
+			{
+				snprintf(msg, msg_n, "Nothing copied: not enough room on the hard disk, %.1f GB needed, %.1f GB free", sum / 1073741824.0, freeb / 1073741824.0);
+				return -1;
+			}
+			if (!ask_hdd(n, sum, freeb))
+			{
+				snprintf(msg, msg_n, "Nothing copied");
+				return -1;
+			}
+			cd_to = cdl[0];
 		}
-		snprintf(where, sizeof where, "the hard disk");
+		move_ok = 1;	/* v0.75 */
+		ask_move(1);
+		snprintf(where, sizeof where, "%s", cd_to.name);
 	}
 	else
 	{
@@ -1567,6 +2513,13 @@ int copy_games(unsigned (*pad)(void), int plat, const game_t *list, int n, char 
 		else
 			snprintf(msg, msg_n, "%d of %d copied to %s. Not copied: %s", ok, n, where, why1);
 	}
+	if (move_after)
+	{
+		size_t l = strlen(msg);
+
+		snprintf(msg + l, msg_n - l, ". %d original%s deleted", moved_n, moved_n == 1 ? "" : "s");
+	}
+	move_after = 0;
 	logf_("batch result: %s", msg);
 	return bad || stopped ? -1 : 0;
 }

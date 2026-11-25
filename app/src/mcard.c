@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
+#include <strings.h>
 #include "look.h"
 #include "screens.h"
 #include "vmc.h"
@@ -16,7 +17,7 @@
 #define MC_COLS		4
 #define MC_ROWS		2
 
-enum { MM_BROWSE, MM_OPTIONS, MM_ASK, MM_FILES };
+enum { MM_BROWSE, MM_OPTIONS, MM_ASK, MM_FILES, MM_CARD, MM_NAME };	/* v0.79: the card menu, the name keyboard */
 
 static int mc_card, mc_sel, mc_top, mc_mode, mc_pick, mc_npick;
 static int mc_targets[MC_CARDS], mc_ntarget;	/* the cards a save can be copied to */
@@ -28,9 +29,14 @@ static int mc_targets[MC_CARDS], mc_ntarget;	/* the cards a save can be copied t
 static int mc_act;
 static int mc_ndev;				/* the places a save can be sent to (0 on a PS1 card) */
 static int mc_fsel, mc_ftop;			/* the save file chosen in the list (MM_FILES) */
+static int mc_move;				/* v0.76: the answer to "Delete it from this card afterwards?" */
+static int mc_ask2;				/* v0.76: that second question is up (after "Yes" to "Send this save?") */
 #define MC_FROWS	7
 static char mc_note[120];
 static unsigned mc_note_until;
+/* v0.79: the card menu and the name keyboard (their code is above mc_draw) */
+static int cm_pick, kb_x, kb_y, kb_low;
+static char kb_name[VMC_NAME_MAX + 1];
 
 
 static void mc_say(const char *s)
@@ -55,7 +61,8 @@ void mc_step(void)
 
 unsigned mc_nav_sig(void)	/* v0.72: screens.h */
 {
-	return (unsigned)(mc_card * 4096 + mc_sel * 64 + mc_mode * 16 + mc_pick) + (unsigned)mc_fsel * 65536u;
+	return (unsigned)(mc_card * 4096 + mc_sel * 64 + mc_mode * 16 + mc_pick) + (unsigned)mc_fsel * 65536u + (unsigned)mc_ask2 * 8u
+		+ (unsigned)(kb_x * 7 + kb_y * 131 + cm_pick * 1031 + kb_low * 3) + (unsigned)strlen(kb_name) * 4099u;	/* v0.79 */
 }
 
 /* ---- icons ---- */
@@ -250,6 +257,153 @@ static void tabs(void)
 	}
 }
 
+/* ---- v0.79: new cards and card names (Bananafuzzbuddy, 11-25: "allow the creation of new cards, and the renaming of
+ * cards"). START opens a short menu; a name is typed on a small keyboard. vmcnew.c holds the name rules and
+ * makes the files: a new PS2 card is byte for byte the PS3's own empty card (host/vmcnew_test.sh). ---- */
+enum { CM_NEW2, CM_NEW1, CM_RENAME, CM_CANCEL };
+static int cm_opt[4], cm_n;
+static int kb_for;
+static char kb_err[140];
+#define KB_COLS	10
+#define KB_ROWS	4
+static const char kb_keys[KB_ROWS][KB_COLS + 1] = { "ABCDEFGHIJ", "KLMNOPQRST", "UVWXYZ0123", "456789 -_\x01" };	/* \x01: capitals / small letters */
+#define PRISM_PS1_CARD	"PRISM_PS1_1"	/* launch.c PS1CARD_NAME: PS1 games started from Prism get this card BY NAME */
+
+static char kb_char(int x, int y)
+{
+	char c = kb_keys[y][x];
+
+	return kb_low && c >= 'A' && c <= 'Z' ? (char)(c + 32) : c;
+}
+
+static void cm_open(void)
+{
+	cm_n = 0;
+	cm_opt[cm_n++] = CM_NEW2;
+	cm_opt[cm_n++] = CM_NEW1;
+	if (n_cards)
+		cm_opt[cm_n++] = CM_RENAME;
+	cm_opt[cm_n++] = CM_CANCEL;
+	cm_pick = cm_n - 1;	/* starts on "Cancel" */
+	mc_mode = MM_CARD;
+}
+
+static void kb_open(int what)
+{
+	int i, k;
+
+	kb_for = what;
+	kb_x = kb_y = kb_low = 0;
+	kb_err[0] = 0;
+	if (what == CM_RENAME)
+		snprintf(kb_name, sizeof kb_name, "%s", cards[mc_card].name);
+	else
+		for (k = 1; k < 100; k++)
+		{
+			/* the first "Prism PS2 Card N" that no card has */
+			snprintf(kb_name, sizeof kb_name, "Prism %s Card %d", what == CM_NEW1 ? "PS1" : "PS2", k);
+			for (i = 0; i < n_cards; i++)
+				if (!strcasecmp(cards[i].name, kb_name))
+					break;
+			if (i == n_cards)
+				break;
+		}
+	mc_mode = MM_NAME;
+}
+
+/* START on the keyboard: make the card, or rename it. A refusal stays on the keyboard and says why. */
+static void kb_commit(void)
+{
+	char why[120], ln[200], nf[80];
+	size_t l = strlen(kb_name);
+	int r, i;
+
+	while (l && kb_name[l - 1] == ' ')
+		kb_name[--l] = 0;
+	if (kb_for == CM_RENAME)
+	{
+		const char *file = strrchr(cards[mc_card].path, '/');
+
+		file = file ? file + 1 : cards[mc_card].path;
+		r = vmc_rename(VMC_DIR, file, kb_name, nf, sizeof nf, why, sizeof why);
+	}
+	else
+	{
+		progress(NULL, "ONE MOMENT", "Making the new memory card", 0.5f, kb_name);
+		r = vmc_new(VMC_DIR, kb_name, kb_for == CM_NEW1, ui_now_s, why, sizeof why);
+	}
+	if (r)
+	{
+		snprintf(kb_err, sizeof kb_err, "Not done: %s.", why);
+		return;
+	}
+	mc_open();	/* the cards again, in their order */
+	for (i = 0; i < n_cards; i++)
+		if (!strcmp(cards[i].name, kb_name))
+			mc_card = i;
+	if (kb_for == CM_RENAME)
+		snprintf(ln, sizeof ln, "Renamed to %s. A card in an XMB slot needs its slot given again.", kb_name);
+	else
+		snprintf(ln, sizeof ln, "Made the %s card %s. It is empty and ready.", kb_for == CM_NEW1 ? "PS1" : "PS2", kb_name);
+	mc_say(ln);
+}
+
+static void card_sheets(void)
+{
+	char ln[160], t[160];
+	int k, r, c;
+
+	if (mc_mode == MM_CARD)
+	{
+		static const char *const words[] = { "New PS2 card", "New PS1 card", "Rename this card", "Cancel" };
+		int y0 = 150, h = 52 + 36 * cm_n;
+
+		sheet(156.0f, (float)y0, 484.0f, (float)(y0 + h));
+		text_centre(F_SMALL, 320, y0 + 14, 1, DIM, "MEMORY CARDS");
+		for (k = 0; k < cm_n; k++)
+			sheet_item(y0 + 48 + 36 * k, cm_pick == k, words[cm_opt[k]]);
+	}
+	else if (mc_mode == MM_NAME)
+	{
+		sheet(110.0f, 92.0f, 530.0f, 396.0f);
+		text_centre(F_BOLD, 320, 106, 0, INK, kb_for == CM_RENAME ? "Rename the card" : kb_for == CM_NEW1 ? "New PS1 card: its name" : "New PS2 card: its name");
+		rect(150.0f, 138.0f, 490.0f, 168.0f, RGBA(0x02, 0x04, 0x0C, 0x60));
+		frame_rect(150.0f, 138.0f, 490.0f, 168.0f, 1.0f, LINE);
+		text(F_BODY, 162, 144, INK, kb_name);
+		if ((frame / 30) & 1)
+			text(F_BODY, 162 + text_w(F_BODY, kb_name, 0), 144, GLOW, "_");
+		snprintf(ln, sizeof ln, "%d OF %d", (int)strlen(kb_name), VMC_NAME_MAX);
+		text_centre(F_SMALL, 320, 176, 1, FAINT, ln);
+		for (r = 0; r < KB_ROWS; r++)
+			for (c = 0; c < KB_COLS; c++)
+			{
+				float cx = 140.0f + c * 40.0f, cy = 200.0f + r * 32.0f;
+				char key[6] = { kb_char(c, r), 0, 0, 0, 0, 0 };
+				int on = c == kb_x && r == kb_y;
+
+				if (key[0] == 1)
+					strcpy(key, kb_low ? "ABC" : "abc");
+				else if (key[0] == ' ')
+					strcpy(key, "SPC");
+				if (on)
+				{
+					rect(cx - 18.0f, cy - 4.0f, cx + 18.0f, cy + 22.0f, RGBA(0x7F, 0xE3, 0xFF, 0x1C));
+					frame_rect(cx - 18.0f, cy - 4.0f, cx + 18.0f, cy + 22.0f, 1.0f, GLOW);
+				}
+				text_centre(key[1] ? F_SMALL : F_BODY, (int)cx, (int)cy + (key[1] ? 3 : 0), 0, on ? INK : DIM, key);
+			}
+		text_centre(F_SMALL, 320, 334, 0, DIM, "X types  " DOT "  Square deletes  " DOT "  Triangle: capitals or small");
+		text_centre(F_SMALL, 320, 352, 0, DIM, "START: done  " DOT "  Circle: back, nothing changes");
+		if (kb_err[0])
+			fit(t, sizeof t, F_SMALL, kb_err, 400);
+		else if (kb_for == CM_RENAME)
+			fit(t, sizeof t, F_SMALL, "Its saves stay as they are. A card in an XMB slot needs its slot given again.", 400);
+		else
+			fit(t, sizeof t, F_SMALL, "An empty, formatted card, as the XMB makes them.", 400);
+		text_centre(F_SMALL, 320, 372, 0, kb_err[0] ? AMBER : FAINT, t);
+	}
+}
+
 void mc_draw(void)
 {
 	char ln[120], t[90];
@@ -262,9 +416,11 @@ void mc_draw(void)
 	{
 		text_centre(F_HEAD, 320, 176, 0, INK, "No memory cards");
 		text_centre(F_BODY, 320, 222, 0, DIM, "The console has no virtual memory cards yet.");
-		text_centre(F_BODY, 320, 248, 0, DIM, "Make one on the XMB, under Memory Card Utility.");
+		text_centre(F_BODY, 320, 248, 0, DIM, "START makes a new one.");	/* v0.79 */
 		legend_line();
-		legend_icon(LEFT, 3, "Menu");
+		c = legend_item(LEFT, -1, "START", "New card");
+		legend_icon(c, 3, "Menu");
+		card_sheets();
 		return;
 	}
 	tabs();
@@ -350,7 +506,8 @@ void mc_draw(void)
 	if (cd->ok && !cd->ps1)
 		x = legend_icon(x, 1, "Bring in");	/* v0.67: a save file from a USB drive or a card */
 	x = legend_item(x, -1, "L1 R1", "Card");
-	x = legend_item(x, -1, "SELECT", "Read again");
+	x = legend_item(x, -1, "START", "Cards");	/* v0.79 */
+	x = legend_item(x, -1, "SELECT", "Reread");
 	legend_icon(x, 3, "Menu");
 
 	if (mc_mode == MM_OPTIONS && s)
@@ -421,17 +578,25 @@ void mc_draw(void)
 		}
 		else
 		{
-		text_centre(F_BOLD, 320, 154, 0, INK, mc_act >= 0 ? "Copy this save?" : IS_SEND(mc_act) ? "Send this save?" : "Delete this save?");
+		text_centre(F_BOLD, 320, 154, 0, INK, mc_act >= 0 ? "Copy this save?" : mc_ask2 ? "Delete it from this card afterwards?"
+			: IS_SEND(mc_act) ? "Send this save?" : "Delete this save?");
 		fit(ln, sizeof ln, F_BODY, s->title, 310);
 		text_centre(F_BODY, 320, 188, 0, DIM, ln);
-		if (mc_act >= 0)
+		if (mc_ask2)
+		{
+			/* v0.76 (Bananafuzzbuddy, 11-25: "after the confirmation I want it to ask if i want to delete the original
+			 * to which i can say yes or no") */
+			snprintf(ln, sizeof ln, "The file on %s is read back first.", sf_dev[ACT_SEND - mc_act].name);
+			text_centre(F_SMALL, 320, 226, 0, mc_pick ? AMBER : FAINT, mc_pick ? "Yes: the save is then deleted from this card for good." : "No: the save stays on the card too.");
+		}
+		else if (mc_act >= 0)
 			snprintf(ln, sizeof ln, "It will be copied to %s.", cards[mc_act].name);
 		else if (IS_SEND(mc_act))
 		{
 			/* v0.67: a second, smaller line says what happens to a file already there */
 			snprintf(ln, sizeof ln, "To %s, in its folder " SF_DIR ".", sf_dev[ACT_SEND - mc_act].name);
 			text_centre(F_SMALL, 320, 226, 0, sf_exists(ACT_SEND - mc_act, s->dir) ? AMBER : FAINT,
-				sf_exists(ACT_SEND - mc_act, s->dir) ? "The file already there for this save is replaced." : "The save stays on the card.");
+				sf_exists(ACT_SEND - mc_act, s->dir) ? "The file already there for this save is replaced." : "Next: whether it also leaves this card.");
 		}
 		else
 			snprintf(ln, sizeof ln, "It will be gone from %s for good.", cd->name);
@@ -450,6 +615,7 @@ void mc_draw(void)
 			text_centre(F_BODY, (int)bx + 55, 256, 0, mc_pick == c ? INK : DIM, c ? "Yes" : "No");
 		}
 	}
+	card_sheets();	/* v0.79 */
 }
 
 /* ---- pad ---- */
@@ -488,8 +654,21 @@ static void do_action(void)
 			snprintf(ln, sizeof ln, "Written to %s: %s", sf_dev[d].name, shown);
 		else
 			snprintf(ln, sizeof ln, "Not written: %s.", why);
-		mc_say(ln);
-		return;		/* nothing on the cards changed: no need to read them again */
+		if (r != 0 || !mc_move)
+		{
+			mc_move = 0;
+			mc_say(ln);
+			return;		/* nothing on the cards changed: no need to read them again */
+		}
+		/* v0.75: the file is written and was read back (sf_export): the save may leave the card */
+		mc_move = 0;
+		progress(NULL, "ONE MOMENT", "Deleting the save from the card", 0.8f, cd->name);
+		r = vmc_delete(cd, mc_sel, why, sizeof why);
+		if (r == 0)
+			snprintf(ln, sizeof ln, "Moved to %s: %s", sf_dev[d].name, shown);
+		else
+			snprintf(ln, sizeof ln, "Written to %s, but not deleted from the card: %s.", sf_dev[d].name, why);
+		/* falls through to the reload below: the card changed */
 	}
 	else if (mc_act >= 0)
 	{
@@ -537,6 +716,69 @@ int mc_pad(unsigned pressed)
 	card_t *cd = n_cards ? &cards[mc_card] : NULL;
 	int n = cd ? cd->n : 0, i;
 
+	if (mc_mode == MM_CARD)
+	{
+		/* v0.79 */
+		if (pressed & PAD_UP)
+			cm_pick = cm_pick ? cm_pick - 1 : cm_n - 1;
+		if (pressed & PAD_DOWN)
+			cm_pick = cm_pick < cm_n - 1 ? cm_pick + 1 : 0;
+		if (pressed & (PAD_CIRCLE | PAD_TRIANGLE | PAD_START))
+			mc_mode = MM_BROWSE;
+		else if (pressed & PAD_CROSS)
+		{
+			int o = cm_opt[cm_pick];
+
+			mc_mode = MM_BROWSE;
+			if (o == CM_RENAME && cd && !strcasecmp(cd->name, PRISM_PS1_CARD))
+				mc_say("PS1 games started from Prism save to this card by this name: it keeps the name.");
+			else if ((o == CM_NEW2 || o == CM_NEW1) && n_cards >= MC_CARDS)
+				mc_say("Prism shows eight cards at most: there is no room for another.");
+			else if (o != CM_CANCEL)
+				kb_open(o);
+		}
+		return 0;
+	}
+	if (mc_mode == MM_NAME)
+	{
+		size_t l = strlen(kb_name);
+
+		if (pressed & PAD_LEFT)
+			kb_x = kb_x ? kb_x - 1 : KB_COLS - 1;
+		if (pressed & PAD_RIGHT)
+			kb_x = kb_x < KB_COLS - 1 ? kb_x + 1 : 0;
+		if (pressed & PAD_UP)
+			kb_y = kb_y ? kb_y - 1 : KB_ROWS - 1;
+		if (pressed & PAD_DOWN)
+			kb_y = kb_y < KB_ROWS - 1 ? kb_y + 1 : 0;
+		if (pressed & PAD_TRIANGLE)
+			kb_low ^= 1;
+		if ((pressed & PAD_SQUARE) && l)
+		{
+			kb_name[--l] = 0;
+			kb_err[0] = 0;
+		}
+		if (pressed & PAD_CROSS)
+		{
+			char ch = kb_char(kb_x, kb_y);
+
+			kb_err[0] = 0;
+			if (ch == 1)
+				kb_low ^= 1;
+			else if (l >= VMC_NAME_MAX)
+				snprintf(kb_err, sizeof kb_err, "A card's name has %d characters at most.", VMC_NAME_MAX);
+			else if (!(ch == ' ' && l == 0))
+			{
+				kb_name[l] = ch;
+				kb_name[l + 1] = 0;
+			}
+		}
+		if (pressed & PAD_CIRCLE)
+			mc_mode = MM_BROWSE;
+		else if (pressed & PAD_START)
+			kb_commit();
+		return 0;
+	}
 	if (mc_mode == MM_OPTIONS)
 	{
 		if (pressed & PAD_UP)
@@ -560,6 +802,7 @@ int mc_pad(unsigned pressed)
 			}
 			mc_mode = MM_ASK;
 			mc_pick = 0;		/* the question starts on "No" */
+			mc_move = mc_ask2 = 0;	/* v0.76 */
 		}
 		return 0;
 	}
@@ -568,12 +811,32 @@ int mc_pad(unsigned pressed)
 		if (pressed & (PAD_LEFT | PAD_RIGHT))
 			mc_pick ^= 1;
 		if (pressed & (PAD_CIRCLE | PAD_TRIANGLE))
-			mc_mode = MM_BROWSE;
+		{
+			mc_mode = MM_BROWSE;	/* at either question: nothing is sent */
+			mc_move = mc_ask2 = 0;
+		}
 		else if (pressed & PAD_CROSS)
 		{
-			mc_mode = MM_BROWSE;
-			if (mc_pick == 1 && (n || mc_act == ACT_BRING))
-				do_action();
+			if (mc_ask2)
+			{
+				/* v0.76: the second answer; either way the save is sent now */
+				mc_move = mc_pick;
+				mc_ask2 = 0;
+				mc_mode = MM_BROWSE;
+				if (n)
+					do_action();
+			}
+			else if (mc_pick == 1 && n && IS_SEND(mc_act))
+			{
+				mc_ask2 = 1;		/* v0.76: "Yes, send it": now, should it leave the card? */
+				mc_pick = 0;		/* starts on "No" */
+			}
+			else
+			{
+				mc_mode = MM_BROWSE;
+				if (mc_pick == 1 && (n || mc_act == ACT_BRING))
+					do_action();
+			}
 		}
 		return 0;
 	}
@@ -595,11 +858,17 @@ int mc_pad(unsigned pressed)
 			mc_act = ACT_BRING;
 			mc_mode = MM_ASK;
 			mc_pick = 0;		/* the question starts on "No" */
+			mc_move = mc_ask2 = 0;	/* v0.76 */
 		}
 		return 0;
 	}
 	if (pressed & (PAD_CIRCLE | PAD_TRIANGLE))
 		return 1;
+	if (pressed & PAD_START)
+	{
+		cm_open();	/* v0.79: also with no card at all */
+		return 0;
+	}
 	if (!cd)
 		return 0;
 	if (pressed & (PAD_L1 | PAD_R1))

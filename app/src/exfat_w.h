@@ -27,6 +27,13 @@ void exw_abort(void);
  * 0 = gone and its space free; -1 = nothing was changed (why says what stopped it); -2 = the file is
  * gone but a later write failed (why says what a disk check has to tidy). */
 int  exw_delete(const exw_dev *dev, const char *dir, const char *name, char *why, int wn);
+/* v0.74, for save files on an exFAT-only card (savefiles.c):
+ * exw_mkdir: make the folder <name> in the root (0 = made, -1 = nothing changed, why says);
+ * exw_list: every name in <dir> to cb (1 from cb stops); exw_read: a small file, whole, into buf. */
+typedef int (*exw_list_cb)(void *arg, const char *name, uint64_t size, int is_dir);
+int  exw_mkdir(const exw_dev *dev, const char *name, char *why, int wn);
+int  exw_list(const exw_dev *dev, const char *dir, exw_list_cb cb, void *arg, char *why, int wn);
+int  exw_read(const exw_dev *dev, const char *dir, const char *name, void *buf, uint32_t cap, uint32_t *len, char *why, int wn);
 /* v0.73: the exFAT volume's free and whole size, bytes. 0 = found; nothing is written */
 int  exw_space(const exw_dev *dev, uint64_t *free_b, uint64_t *total_b, char *why, int wn);
 /* free space on the exFAT volume (after exw_begin or exw_delete), bytes */

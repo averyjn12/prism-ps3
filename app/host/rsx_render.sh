@@ -14,7 +14,7 @@ rm -rf "$B"; mkdir -p "$B"
 CGLIB="$HOME/cg/usr/lib64"
 CFLAGS=(-O2 -Wall -Wno-unused-function -Wno-unused-variable -Wno-format-truncation -mcpu=cell -mhard-float -fmodulo-sched -ffunction-sections -fdata-sections
  -DUI_RSX -DRENDER_PS3 "-I$PSL1GHT/ppu/include" "-I$S")
-for f in "$HERE/render.c" "$S/gfx.c" "$S/ui.c" "$S/screens.c" "$S/mcard.c" "$S/art.c" "$S/vmc.c" "$S/vmcw.c" "$S/settings.c" "$S/help.c" "$S/icons.c" \
+for f in "$HERE/render.c" "$S/gfx.c" "$S/ui.c" "$S/screens.c" "$S/mcard.c" "$S/art.c" "$S/vmc.c" "$S/vmcw.c" "$S/vmcnew.c" "$S/settings.c" "$S/help.c" "$S/icons.c" \
          "$S/intro.c" "$S/titles.c" "$S/played.c" "$HERE/stub_v15.c" "$HERE/stub_v61.c" "$HERE/stub_v65.c" "$HERE/stub_v67.c"; do
     ppu-gcc "${CFLAGS[@]}" -c "$f" -o "$B/$(basename "${f%.c}").o"
 done

@@ -7,13 +7,15 @@
 #include "vmc.h"
 
 #define SF_DIR		"PS2SAVES"
-#define SF_DEVS		6
+#define SF_DEVS		9	/* v0.75: was 6; a card's exFAT part can be a place too */
 #define SF_FILES	64
 
 typedef struct
 {
 	char path[24];		/* "/dev_usb000" */
 	char name[20];		/* "USB 0" */
+	int exf_slot;		/* v0.75: -1 = a place the PS3 mounts (path); else the card slot whose exFAT part this is
+				 * (0 Memory Stick, 1 SD, 2 CompactFlash), read and written by Prism's own exFAT code */
 } sf_dev_t;
 
 typedef struct

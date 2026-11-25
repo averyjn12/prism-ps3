@@ -39,7 +39,9 @@ enum { DO_NOTHING, DO_START, DO_RESCAN, DO_QUIT, DO_PROBE, DO_RIP,
 	/* v0.67: copy the marked games (rip.c copy_games) */
 	DO_COPYMARKED,
 	/* v0.69: a PSP game opens in PPSSPP (launch.h PSPL_PPSSPP) */
-	DO_PSPL_PPS };
+	DO_PSPL_PPS,
+	DO_DELMARKED_ASK, DO_DELMARKED,	/* v0.75: every marked game, after the same two questions */
+	DO_WM_ADD_MARKED, DO_WM_DEL_MARKED };	/* v0.78: the marked card games in / out of webMAN's list */
 
 extern unsigned frame;		/* 1/60 s since the app started */
 extern unsigned long long ui_now_s;	/* v0.67: the console clock, seconds (main.c keeps it; for "2 hours ago") */
@@ -56,6 +58,7 @@ unsigned mc_nav_sig(void);	/* mcard.c */
 unsigned settings_nav_sig(void);	/* settings.c, the help pages included */
 unsigned help_nav_sig(void);	/* help.c */
 struct game_s;
+void ui_ask_delete_many(int n, const char *what);	/* v0.75 */
 int  ui_marked(void *out, int max);	/* v0.67: copies of the marked games of this list (game_t out[max]); the count */
 void ui_say(const char *s);
 void progress(const void *g, const char *head, const char *title, float done, const char *what);

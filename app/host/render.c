@@ -537,6 +537,39 @@ int main(int argc, char **argv)
 		ui_pad(PAD_SQUARE, 0);
 		shot("v67_ps2_marked_options", 3410);
 		ui_pad(PAD_CIRCLE, 0);
+		ui_ask_delete_many(2, "5.2 GB in all, from this list");	/* v0.75 */
+		shot("v75_marked_delete_ask", 3420);
+		ui_pad(PAD_RIGHT, 0);
+		ui_pad(PAD_CROSS, 0);
+		shot("v75_marked_delete_ask2", 3430);
+		ui_pad(PAD_CIRCLE, 0);
+	}
+	{
+		/* v0.79: MEMORY CARD, START: the card menu, the name keyboard for a rename and for a new card */
+		int k;
+
+		for (k = 0; k < 3; k++)
+			ui_pad(PAD_CIRCLE, 0);
+		ui_home_go(4);
+		ui_pad(PAD_CROSS, 0);
+		ui_pad(PAD_START, 0);
+		shot("v79_mc_card_menu", 3500);
+		ui_pad(PAD_UP, 0);			/* Cancel -> Rename this card */
+		ui_pad(PAD_CROSS, 0);
+		shot("v79_mc_rename", 3515);		/* frame 3515: the cursor shows */
+		ui_pad(PAD_CIRCLE, 0);
+		ui_pad(PAD_START, 0);
+		ui_pad(PAD_DOWN, 0);			/* Cancel -> New PS2 card */
+		ui_pad(PAD_CROSS, 0);
+		shot("v79_mc_new_name", 3540);
+		ui_pad(PAD_RIGHT, 0);
+		ui_pad(PAD_DOWN, 0);
+		ui_pad(PAD_CROSS, 0);			/* "L" */
+		ui_pad(PAD_TRIANGLE, 0);
+		ui_pad(PAD_CROSS, 0);			/* "l" */
+		shot("v79_mc_new_typed", 3555);
+		ui_pad(PAD_CIRCLE, 0);
+		ui_pad(PAD_CIRCLE, 0);
 	}
 #ifdef RENDER_RSX
 	printf("done\n");

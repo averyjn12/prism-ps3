@@ -32,7 +32,7 @@ MUT = [
 def run(path):
     env = dict(os.environ, EXW=path)
     try:
-        p = subprocess.run(["bash", os.path.join(HERE, "exd_test.sh")], env=env, capture_output=True, text=True, timeout=900)
+        p = subprocess.run(["bash", os.path.join(HERE, "exd_test.sh")], env=env, capture_output=True, text=True, errors="replace", timeout=900)
     except subprocess.TimeoutExpired:
         return None, "timeout"
     return p.returncode, p.stdout + p.stderr

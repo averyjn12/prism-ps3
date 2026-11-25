@@ -13,7 +13,7 @@ PSL="$HOME/ps3dev/ps3dev"
 B="$HOME/prism_app_host/rsx_host"
 ART="$1"; OUT="$2"; shift 2
 mkdir -p "$B" "$OUT/cpu" "$OUT/rsx" "$OUT/diff"
-SRC=("$HERE/render.c" "$S/ui.c" "$S/screens.c" "$S/mcard.c" "$S/art.c" "$S/vmc.c" "$S/vmcw.c" "$S/settings.c" "$S/help.c" "$S/icons.c" "$S/intro.c" "$S/titles.c" "$S/played.c"
+SRC=("$HERE/render.c" "$S/ui.c" "$S/screens.c" "$S/mcard.c" "$S/art.c" "$S/vmc.c" "$S/vmcw.c" "$S/vmcnew.c" "$S/settings.c" "$S/help.c" "$S/icons.c" "$S/intro.c" "$S/titles.c" "$S/played.c"
      "$HERE/stub_v15.c" "$HERE/stub_v61.c" "$HERE/stub_v65.c" "$HERE/stub_v67.c")
 # -DMC_LIVE_ICONS: the Memory Card screen's icons turn live in the CPU pictures too (the app's CPU path shows
 # stills of them, the RSX path turns them), so the two sets differ only by how they were drawn

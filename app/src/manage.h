@@ -6,6 +6,7 @@
 /* What deleting g would remove: 0 and a line for the question ("3 files, 4.2 GB on SD card"),
  * or negative and why it cannot be deleted from here. */
 int  game_del_plan(int plat, const game_t *g, char *what, int n);
+unsigned long long game_del_bytes(void);	/* v0.75: bytes the last plan found */
 int  game_delete(unsigned (*pad)(void), int plat, const game_t *g, char *msg, int n);	/* Circle stops it */
 int  game_files(int plat, const game_t *g, char (*out)[256], int max);	/* PS1 / PS3 .iso: its files */
 
