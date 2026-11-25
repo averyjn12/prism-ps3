@@ -7,6 +7,10 @@
 #include "gfx.h"
 #include "font_ps3.h"
 
+#if defined(UI_RSX) && (FONT_TEX_W != GX_FONT_W || FONT_TEX_H != GX_FONT_H)
+#error "gfx.h GX_FONT_W / GX_FONT_H must be the font's FONT_TEX_W / FONT_TEX_H"
+#endif
+
 #define S	(720.0f / 448.0f)
 #define OX	((1280.0f - 640.0f * S) / 2.0f)
 #define XC(x)	(OX + (x) * S)
@@ -27,6 +31,113 @@ static fcol fc(col_t c)
 	f.a = a >= 0x80 ? 256.0f : (float)(a * 2);
 	return f;
 }
+
+#ifdef UI_RSX
+/* ---- v0.67: the same shapes handed to the RSX (gfx.h). Same coordinates, same colours; the RSX
+ * covers a pixel when its centre is inside, as the loops below do. What differs, on purpose: the
+ * 3D icons' texels are smoothed (the CPU takes the nearest). ---- */
+
+static gxv_t *g_plain(int n)
+{
+	static int font_sent;
+
+	if (!font_sent)
+	{
+		gx_font(font_cov);
+		font_sent = 1;
+	}
+	return gx_prims(NULL, 0, 0, n);
+}
+
+static inline void g_v(gxv_t *p, float X, float Y, fcol c)
+{
+	gx_put(p, X, Y, GX_WHITE_U, GX_WHITE_V, c.r * (1.0f / 255.0f), c.g * (1.0f / 255.0f), c.b * (1.0f / 255.0f), c.a * (1.0f / 256.0f));
+}
+
+static fcol mix(fcol a, fcol b, float t)
+{
+	fcol f;
+
+	f.r = a.r + (b.r - a.r) * t; f.g = a.g + (b.g - a.g) * t; f.b = a.b + (b.b - a.b) * t; f.a = a.a + (b.a - a.a) * t;
+	return f;
+}
+
+static int flat_plane(float a, float b, float c, float d)
+{
+	float e = a + d - b - c;
+
+	return e > -0.01f && e < 0.01f;
+}
+
+static void g_crect(float X0, float Y0, float X1, float Y1, fcol tl, fcol tr, fcol bl, fcol br)
+{
+	gxv_t *p;
+
+	if (X1 <= X0 || Y1 <= Y0)
+		return;
+	if (flat_plane(tl.r, tr.r, bl.r, br.r) && flat_plane(tl.g, tr.g, bl.g, br.g) && flat_plane(tl.b, tr.b, bl.b, br.b) && flat_plane(tl.a, tr.a, bl.a, br.a))
+	{
+		/* one colour, or a gradient along one direction: two triangles carry it exactly */
+		p = g_plain(6);
+		if (!p)
+			return;
+		g_v(p + 0, X0, Y0, tl); g_v(p + 1, X1, Y0, tr); g_v(p + 2, X0, Y1, bl);
+		g_v(p + 3, X1, Y0, tr); g_v(p + 4, X1, Y1, br); g_v(p + 5, X0, Y1, bl);
+		return;
+	}
+	{
+		/* four unrelated corners (the backdrop's two soft lights): the CPU blends them bilinearly,
+		 * which two triangles cannot; a 16 x 16 grid of them is within a 1/1000 of it */
+		enum { N = 16 };
+		int i, j;
+
+		p = g_plain(N * N * 6);
+		if (!p)
+			return;
+		for (j = 0; j < N; j++)
+		{
+			float t0 = (float)j / N, t1 = (float)(j + 1) / N, ya = Y0 + (Y1 - Y0) * t0, yb = Y0 + (Y1 - Y0) * t1;
+			fcol l0 = mix(tl, bl, t0), r0 = mix(tr, br, t0), l1 = mix(tl, bl, t1), r1 = mix(tr, br, t1);
+
+			for (i = 0; i < N; i++, p += 6)
+			{
+				float s0 = (float)i / N, s1 = (float)(i + 1) / N, xa = X0 + (X1 - X0) * s0, xb = X0 + (X1 - X0) * s1;
+				fcol a = mix(l0, r0, s0), b = mix(l0, r0, s1), c = mix(l1, r1, s0), d = mix(l1, r1, s1);
+
+				g_v(p + 0, xa, ya, a); g_v(p + 1, xb, ya, b); g_v(p + 2, xa, yb, c);
+				g_v(p + 3, xb, ya, b); g_v(p + 4, xb, yb, d); g_v(p + 5, xa, yb, c);
+			}
+		}
+	}
+}
+
+static const float *g_depth;	/* v0.72: the three depths of the triangle tri_tex_z is drawing, or NULL */
+
+static void g_ctri(const float *X, const float *Y, const fcol *c, const tex_t *tex, const float *U, const float *V)
+{
+	gxv_t *p;
+	int k;
+
+	if (!tex)
+	{
+		p = g_plain(3);
+		if (p)
+			for (k = 0; k < 3; k++)
+				g_v(p + k, X[k], Y[k], c[k]);
+		return;
+	}
+	if (!tex->px)
+		return;
+	p = gx_prims(tex->px, tex->w, tex->h, 3);
+	if (p)
+		for (k = 0; k < 3; k++)	/* the colour modulates the texel, 0x80 = unchanged */
+		{
+			gx_put(p + k, X[k], Y[k], U[k], V[k], c[k].r * (1.0f / 128.0f), c[k].g * (1.0f / 128.0f), c[k].b * (1.0f / 128.0f), c[k].a * (1.0f / 256.0f));
+			if (g_depth)
+				gx_z(p + k, g_depth[k]);
+		}
+}
+#endif
 
 static inline void put(u32 *p, int r, int g, int b, int w)
 {
@@ -59,6 +170,13 @@ void ui_clear(col_t c)
 {
 	u32 v = (c >> 8) & 0xFFFFFF, *p = fb, *e = fb + CW * CH;
 
+#ifdef UI_RSX
+	if (gfx_gpu)
+	{
+		gx_clear(v);
+		return;
+	}
+#endif
 	while (p < e)
 		*p++ = v;
 }
@@ -69,6 +187,13 @@ static void crect(float X0, float Y0, float X1, float Y1, fcol tl, fcol tr, fcol
 	int x0 = ci(X0), x1 = ci(X1), y0 = ci(Y0), y1 = ci(Y1), x, y;
 	float dx = X1 - X0, dy = Y1 - Y0;
 
+#ifdef UI_RSX
+	if (gfx_gpu)
+	{
+		g_crect(X0, Y0, X1, Y1, tl, tr, bl, br);
+		return;
+	}
+#endif
 	if (x0 < clx0) x0 = clx0;
 	if (y0 < cly0) y0 = cly0;
 	if (x1 > clx1) x1 = clx1;
@@ -152,6 +277,13 @@ static void ctri(const float *X, const float *Y, const fcol *c, const tex_t *tex
 
 	if (area > -1e-4f && area < 1e-4f)
 		return;
+#ifdef UI_RSX
+	if (gfx_gpu)
+	{
+		g_ctri(X, Y, c, tex, U, V);
+		return;
+	}
+#endif
 	mnx = fminf(X[0], fminf(X[1], X[2]));
 	mxx = fmaxf(X[0], fmaxf(X[1], X[2]));
 	mny = fminf(Y[0], fminf(Y[1], Y[2]));
@@ -288,6 +420,8 @@ void blit_keyed(const u32 *src, int w, int h, u32 key, float lx, float ly, int o
 {
 	int X0, Y0, x, y, wt = a >= 0x80 ? 256 : a * 2;
 
+	if (GFX_GPU)
+		return;		/* a CPU-drawn still: its one user (mcard.c) draws the live icon instead */
 	canvas_point(lx, ly, &X0, &Y0);
 	X0 += ox;
 	Y0 += oy;
@@ -420,6 +554,19 @@ void sprite_tex(const tex_t *t, float x0, float y0, float u0, float v0, float x1
 
 	if (!t || !t->px || X1 <= X0 || Y1 <= Y0 || ma <= 0)
 		return;
+#ifdef UI_RSX
+	if (gfx_gpu)
+	{
+		gxv_t *p = gx_prims(t->px, t->w, t->h, 6);
+		float r = mr * (1.0f / 128.0f), g = mg * (1.0f / 128.0f), b = mb * (1.0f / 128.0f), a = ma * (1.0f / 256.0f);
+
+		if (!p)
+			return;
+		gx_put(p + 0, X0, Y0, u0, v0, r, g, b, a); gx_put(p + 1, X1, Y0, u1, v0, r, g, b, a); gx_put(p + 2, X0, Y1, u0, v1, r, g, b, a);
+		gx_put(p + 3, X1, Y0, u1, v0, r, g, b, a); gx_put(p + 4, X1, Y1, u1, v1, r, g, b, a); gx_put(p + 5, X0, Y1, u0, v1, r, g, b, a);
+		return;
+	}
+#endif
 	if (ix0 < clx0) ix0 = clx0;
 	if (iy0 < cly0) iy0 = cly0;
 	if (ix1 > clx1) ix1 = clx1;
@@ -480,6 +627,27 @@ void tri_tex(const tex_t *t, const float *xy, const float *uv, const col_t *c)
 	ctri(X, Y, f, t, U, V);
 }
 
+void tri_tex_z(const tex_t *t, const float *xy, const float *depth, const float *uv, const col_t *c)
+{
+#ifdef UI_RSX
+	g_depth = depth;
+#endif
+	(void)depth;
+	tri_tex(t, xy, uv, c);
+#ifdef UI_RSX
+	g_depth = NULL;
+#endif
+}
+
+void ui_depth(int on)
+{
+#ifdef UI_RSX
+	if (gfx_gpu)
+		gx_depth(on);
+#endif
+	(void)on;
+}
+
 void scissor(float x0, float x1, float y0, float y1)
 {
 	clx0 = ci(XC(x0)); clx1 = ci(XC(x1)); cly0 = ci(YC(y0)); cly1 = ci(YC(y1));
@@ -487,11 +655,19 @@ void scissor(float x0, float x1, float y0, float y1)
 	if (cly0 < 0) cly0 = 0;
 	if (clx1 > CW) clx1 = CW;
 	if (cly1 > CH) cly1 = CH;
+#ifdef UI_RSX
+	if (gfx_gpu)
+		gx_scissor(clx0, cly0, clx1, cly1);
+#endif
 }
 
 void scissor_reset(void)
 {
 	clx0 = 0; clx1 = CW; cly0 = 0; cly1 = CH;
+#ifdef UI_RSX
+	if (gfx_gpu)
+		gx_scissor(0, 0, CW, CH);
+#endif
 }
 
 /* ---- text ---- */
@@ -534,6 +710,33 @@ int text_ex(int f, int x, int y, float scale, int track, col_t c, const char *s)
 			int gw = (int)(g->w * scale + 0.5f), gh = (int)(g->h * scale + 0.5f), i, j;
 			int bx = (int)(pen + g->ox * scale + 0.5f), by = (int)(top + g->oy * scale + 0.5f);
 
+#ifdef UI_RSX
+			if (gfx_gpu)
+			{
+				/* the glyph's box, its texels stepped 1 / scale a pixel as below */
+				gxv_t *p = gw > 0 && gh > 0 ? g_plain(6) : NULL;
+				float X0 = (float)bx, Y0 = (float)by, X1 = (float)(bx + gw), Y1 = (float)(by + gh), d = (float)step * (1.0f / 65536.0f);
+				float u0 = (float)g->u, v0 = (float)g->v, u1, v1;
+				float r = mr * (1.0f / 255.0f), gg = mg * (1.0f / 255.0f), b = mb * (1.0f / 255.0f), a = ma * (1.0f / 256.0f);
+
+				if (gx_exact && step != 65536)
+				{
+					/* scaled text on a 1280 x 720 TV: the CPU loop takes texel floor(i / scale) for pixel i. The RSX
+					 * samples at the pixel's centre, so the box starts half a pixel's worth of texels early, plus
+					 * 1/32 texel to stay clear of the texel edges; then it picks the same texels */
+					u0 += 1.0f / 32.0f - 0.5f * d;
+					v0 += 1.0f / 32.0f - 0.5f * d;
+				}
+				u1 = u0 + gw * d;
+				v1 = v0 + gh * d;
+				if (p)
+				{
+					gx_put(p + 0, X0, Y0, u0, v0, r, gg, b, a); gx_put(p + 1, X1, Y0, u1, v0, r, gg, b, a); gx_put(p + 2, X0, Y1, u0, v1, r, gg, b, a);
+					gx_put(p + 3, X1, Y0, u1, v0, r, gg, b, a); gx_put(p + 4, X1, Y1, u1, v1, r, gg, b, a); gx_put(p + 5, X0, Y1, u0, v1, r, gg, b, a);
+				}
+				gh = 0;		/* nothing for the CPU loop */
+			}
+#endif
 			for (j = 0; j < gh; j++)
 			{
 				int py = by + j, sv = (j * step) >> 16, su16 = 0;

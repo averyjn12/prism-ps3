@@ -12,7 +12,7 @@ SRC="$HERE/../src"
 W=/tmp/exw
 sudo umount "$W/mnt" 2>/dev/null
 rm -rf "$W"; mkdir -p "$W/mnt"
-gcc -O2 -Wall -Wextra -I"$SRC" "$HERE/exw_test.c" "$SRC/exfat_w.c" -o "$W/exw_test" || exit 1
+gcc -O2 -Wall -Wextra -I"$SRC" "$HERE/exw_test.c" "${EXW:-$SRC/exfat_w.c}" -o "$W/exw_test" || exit 1
 T="$W/exw_test"
 pass=0; fail=0
 ok()  { echo "PASS  $1"; pass=$((pass+1)); }

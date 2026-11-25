@@ -340,19 +340,51 @@ static u32 root_list(card_t *c, u32 *cl, u32 *rlen)
 	return chain_list(c, c->rootdir, cl_count(c, *rlen * 512), cl);
 }
 
-static int copy_ps2(card_t *from, save_t *s, card_t *to, char *why, int why_n)
-{
-	static u32 rcl[MAX_CL], scl[MAX_CL], dcl[MAX_CL], fcl[MAX_CL], newcl[MAX_CL];
-	static u8 ents[256][512];
-	u32 dl = (u32)s->dirlen, nd, j, nf = 0, need = 0, rlen, nr, slot, i, used = 0;
-	u32 tr_rlen;
-	u8 root_e[512], e[512];
-	int append = 0;
-	wr_t w;
+/* v0.67: a save on its way from one place to another: out of a card (pkg_from_card) or a .psu file
+ * (vmc_import_psu), into a card (pkg_to_card) or a .psu file (vmc_export_psu). Its root entry, its
+ * folder's entries, and each file's bytes in whole 1024-byte clusters, slack and all: a save copied
+ * card to card through this is byte for byte what v0.8-v0.66 wrote (host/vmcw_regress.sh). */
+#define PKG_FILES	254
+#define PKG_CL		1024
 
+typedef struct
+{
+	u8 root_e[512];
+	u8 ents[2 + PKG_FILES][512];	/* 0 ".", 1 "..", then the files that exist */
+	u32 nf;
+	u8 *data[PKG_FILES];		/* ncl[j] x 1024 bytes; NULL for an empty file */
+	u32 ncl[PKG_FILES];
+} pkg_t;
+
+static pkg_t pk;	/* one at a time: 130 KB, too big for the stack */
+
+static void pkg_free(pkg_t *p)
+{
+	u32 j;
+
+	for (j = 0; j < PKG_FILES; j++)
+	{
+		free(p->data[j]);
+		p->data[j] = NULL;
+		p->ncl[j] = 0;
+	}
+	p->nf = 0;
+}
+
+static int pkg_from_card(card_t *from, save_t *s, pkg_t *p, char *why, int why_n)
+{
+	static u32 rcl[MAX_CL], scl[MAX_CL], fcl[MAX_CL];
+	u32 dl = (u32)s->dirlen, nd, j, nf = 0, rlen, nr;
+
+	pkg_free(p);
 	if (dl < 2 || dl > 256)
 	{
 		snprintf(why, why_n, "the save's folder could not be read");
+		return -1;
+	}
+	if (from->cl != PKG_CL)
+	{
+		snprintf(why, why_n, "this card's cluster size is not 1024 bytes");
 		return -1;
 	}
 	/* the source: its folder and its files */
@@ -364,7 +396,7 @@ static int copy_ps2(card_t *from, save_t *s, card_t *to, char *why, int why_n)
 	}
 	for (j = 0; j < dl; j++)
 	{
-		u8 *f = ents[nf];
+		u8 *f = p->ents[nf];
 
 		ent_read(from, scl, j, f);
 		if (j < 2)
@@ -374,7 +406,6 @@ static int copy_ps2(card_t *from, save_t *s, card_t *to, char *why, int why_n)
 		}
 		if ((le16(f) & (DF_EXISTS | DF_DIR | DF_FILE)) != (DF_EXISTS | DF_FILE))
 			continue;	/* deleted entries and sub-folders stay behind */
-		need += cl_count(from, le32(f + 4));
 		nf++;
 	}
 	nf -= 2;
@@ -384,8 +415,47 @@ static int copy_ps2(card_t *from, save_t *s, card_t *to, char *why, int why_n)
 		snprintf(why, why_n, "the card's root could not be read");
 		return -1;
 	}
-	ent_read(from, rcl, (u32)s->slot, root_e);
+	ent_read(from, rcl, (u32)s->slot, p->root_e);
+	/* the files: cluster for cluster as they are */
+	for (j = 0; j < nf; j++)
+	{
+		u8 *f = p->ents[2 + j];
+		u32 len = le32(f + 4), n = cl_count(from, len), got, k;
 
+		if (!n)
+			continue;
+		got = chain_list(from, le32(f + 0x10), n, fcl);
+		p->data[j] = got < n ? NULL : (u8 *)malloc((size_t)n * PKG_CL);
+		if (!p->data[j])
+		{
+			snprintf(why, why_n, got < n ? "a file of the save is broken on this card" : "out of memory");
+			pkg_free(p);
+			return -1;
+		}
+		p->ncl[j] = n;
+		for (k = 0; k < n; k++)
+			cl_read(from, from->alloc_offset + fcl[k], 0, p->data[j] + (size_t)k * PKG_CL, PKG_CL);
+	}
+	p->nf = nf;
+	return 0;
+}
+
+static int pkg_to_card(pkg_t *p, card_t *to, char *why, int why_n)
+{
+	static u32 rcl[MAX_CL], dcl[MAX_CL], newcl[MAX_CL];
+	u32 nf = p->nf, j, need = 0, nr, slot, i, used = 0;
+	u32 tr_rlen;
+	u8 *root_e = p->root_e, e[512];
+	int append = 0;
+	wr_t w;
+
+	if (to->cl != PKG_CL)
+	{
+		snprintf(why, why_n, "that card's cluster size is not 1024 bytes");
+		return -1;
+	}
+	for (j = 0; j < nf; j++)
+		need += p->ncl[j];
 	/* the target: same name already there? a free root slot? */
 	nr = root_list(to, rcl, &tr_rlen);
 	if (!nr)
@@ -433,28 +503,18 @@ static int copy_ps2(card_t *from, save_t *s, card_t *to, char *why, int why_n)
 	}
 
 	/* the files: cluster for cluster as they are, then their new first cluster in the entry */
-	for (j = 2; j < 2 + nf; j++)
+	for (j = 0; j < nf; j++)
 	{
-		u8 *f = ents[j], buf[1024];
-		u32 len = le32(f + 4), n = cl_count(from, len), got, k;
+		u8 *f = p->ents[2 + j];
+		u32 n = p->ncl[j], k;
 
 		if (!n)
 		{
 			put32(f + 0x10, FAT_END);
 			continue;
 		}
-		got = chain_list(from, le32(f + 0x10), n, fcl);
-		if (got < n || to->cl > sizeof buf)
-		{
-			free(w.dirty);
-			snprintf(why, why_n, "a file of the save is broken on this card");
-			return -1;
-		}
 		for (k = 0; k < n; k++)
-		{
-			cl_read(from, from->alloc_offset + fcl[k], 0, buf, from->cl);
-			cl_write(&w, to->alloc_offset + newcl[used + k], 0, buf, to->cl);
-		}
+			cl_write(&w, to->alloc_offset + newcl[used + k], 0, p->data[j] + (size_t)k * PKG_CL, to->cl);
 		link_chain(&w, newcl + used, n);
 		put32(f + 0x10, newcl[used]);
 		used += n;
@@ -467,10 +527,10 @@ static int copy_ps2(card_t *from, save_t *s, card_t *to, char *why, int why_n)
 
 		memcpy(dcl, newcl + used, n * sizeof(u32));
 		used += n;
-		put32(ents[0] + 0x14, slot);
+		put32(p->ents[0] + 0x14, slot);
 		memset(z, 0, sizeof z);
 		for (k = 0; k < n * (to->cl / 512); k++)
-			ent_write(&w, dcl, k, k < 2 + nf ? ents[k] : z);
+			ent_write(&w, dcl, k, k < 2 + nf ? p->ents[k] : z);
 		link_chain(&w, dcl, n);
 	}
 
@@ -505,6 +565,220 @@ static int copy_ps2(card_t *from, save_t *s, card_t *to, char *why, int why_n)
 	}
 	free(w.dirty);
 	return 0;
+}
+
+static int copy_ps2(card_t *from, save_t *s, card_t *to, char *why, int why_n)
+{
+	int r = pkg_from_card(from, s, &pk, why, why_n);
+
+	if (r == 0)
+		r = pkg_to_card(&pk, to, why, why_n);
+	pkg_free(&pk);
+	return r;
+}
+
+/* ---- the .psu file: a save as other PS2 tools pass it around (uLaunchELF's "psuPaste", mymc, PCSX2's
+ * importers). It is the card's own 512-byte directory entries in a row: the save's folder (its length =
+ * the number of entries that follow), ".", "..", then each file's entry followed by the file's bytes
+ * filled up to a multiple of 1024. The cluster and place fields mean nothing in a file and are written
+ * as 0. Judged by mymcplus, which reads what this writes and writes what this reads (host/psu_test.sh). */
+
+static int name_ok(const u8 *e)
+{
+	const char *n = (const char *)e + 0x40;
+	int k;
+
+	for (k = 0; k < 32 && n[k]; k++)
+		if ((unsigned char)n[k] < 0x20 || n[k] == '/' || n[k] == '\\' || n[k] == '?' || n[k] == '*' || n[k] == ':')
+			return 0;
+	return k > 0 && k < 32 && strcmp(n, ".") && strcmp(n, "..");
+}
+
+int vmc_export_psu(card_t *c, int si, const char *path, char *why, int why_n)
+{
+	u8 e[512];
+	FILE *f;
+	u32 j;
+	int ok = 1;
+
+	why[0] = 0;
+	if (si < 0 || si >= c->n || !c->ok || c->ps1)
+	{
+		snprintf(why, why_n, "only a PS2 save can be written as a .psu file");
+		return -1;
+	}
+	if (pkg_from_card(c, &c->saves[si], &pk, why, why_n))
+		return -1;
+	f = fopen(path, "wb");
+	if (!f)
+	{
+		pkg_free(&pk);
+		snprintf(why, why_n, "the file could not be made there");
+		return -1;
+	}
+	memcpy(e, pk.root_e, 512);
+	put32(e + 4, 2 + pk.nf);
+	put32(e + 0x10, 0);
+	put32(e + 0x14, 0);
+	ok = fwrite(e, 1, 512, f) == 512;
+	for (j = 0; j < 2 + pk.nf && ok; j++)
+	{
+		memcpy(e, pk.ents[j], 512);
+		put32(e + 0x10, 0);
+		put32(e + 0x14, 0);
+		ok = fwrite(e, 1, 512, f) == 512;
+		if (ok && j >= 2 && pk.ncl[j - 2])
+			ok = fwrite(pk.data[j - 2], PKG_CL, pk.ncl[j - 2], f) == pk.ncl[j - 2];
+	}
+	if (fclose(f) != 0)
+		ok = 0;
+	pkg_free(&pk);
+	if (!ok)
+	{
+		remove(path);
+		snprintf(why, why_n, "the file could not be written whole (is there room?)");
+		return -1;
+	}
+	return 0;
+}
+
+/* the save's folder name in a .psu file, without reading the rest (the screen lists files by it);
+ * 0 and name[] filled (33 bytes) when the file starts as a .psu does */
+int vmc_psu_name(const char *path, char *name, unsigned *files)
+{
+	u8 e[512];
+	FILE *f = fopen(path, "rb");
+	int ok;
+
+	if (!f)
+		return -1;
+	ok = fread(e, 1, 512, f) == 512;
+	fclose(f);
+	if (!ok || (le16(e) & (DF_EXISTS | DF_DIR)) != (DF_EXISTS | DF_DIR) || le32(e + 4) < 2 || le32(e + 4) > 2 + PKG_FILES || !name_ok(e))
+		return -1;
+	memcpy(name, e + 0x40, 32);
+	name[32] = 0;
+	if (files)
+		*files = le32(e + 4) - 2;
+	return 0;
+}
+
+int vmc_import_psu(const char *path, card_t *to, char *why, int why_n)
+{
+	u8 *d = NULL;
+	long len, at;
+	FILE *f;
+	u32 n, j, k;
+	int r = -1;
+
+	why[0] = 0;
+	if (!to->ok || to->ps1)
+	{
+		snprintf(why, why_n, "a .psu file holds a PS2 save: choose a PS2 card");
+		return -1;
+	}
+	f = fopen(path, "rb");
+	if (!f)
+	{
+		snprintf(why, why_n, "the file could not be opened");
+		return -1;
+	}
+	fseek(f, 0, SEEK_END);
+	len = ftell(f);
+	fseek(f, 0, SEEK_SET);
+	if (len < 3 * 512 || len > 9L * 1024 * 1024)
+	{
+		fclose(f);
+		snprintf(why, why_n, "not a .psu save file (its size is wrong)");
+		return -1;
+	}
+	d = (u8 *)malloc((size_t)len);
+	if (!d || fread(d, 1, (size_t)len, f) != (size_t)len)
+	{
+		fclose(f);
+		free(d);
+		snprintf(why, why_n, "the file could not be read");
+		return -1;
+	}
+	fclose(f);
+	pkg_free(&pk);
+	n = le32(d + 4);
+	if ((le16(d) & (DF_EXISTS | DF_DIR)) != (DF_EXISTS | DF_DIR) || n < 2 || n > 2 + PKG_FILES || !name_ok(d))
+	{
+		snprintf(why, why_n, "not a .psu save file (its first entry is not a save's folder)");
+		goto out;
+	}
+	memcpy(pk.root_e, d, 512);
+	put16(pk.root_e, 0x8427);
+	at = 512;
+	for (j = 0; j < n; j++)
+	{
+		const u8 *e = d + at;
+		u8 *o;
+		u32 flen, cl;
+
+		if (at + 512 > len)
+		{
+			snprintf(why, why_n, "the file ends before its %u entries do", n);
+			goto out;
+		}
+		at += 512;
+		if (j < 2)
+		{
+			/* "." and "..": as a PS2 writes them on a card (see the head of this file) */
+			o = pk.ents[j];
+			memcpy(o, e, 512);
+			put16(o, 0x8427);
+			put32(o + 4, 0);
+			put32(o + 0x10, 0);
+			put32(o + 0x14, 0);
+			memset(o + 0x40, 0, 32);
+			strcpy((char *)o + 0x40, j ? ".." : ".");
+			continue;
+		}
+		if ((le16(e) & (DF_EXISTS | DF_DIR | DF_FILE)) != (DF_EXISTS | DF_FILE) || !name_ok(e))
+		{
+			snprintf(why, why_n, "entry %u of the file is not a plain file (a folder inside a save cannot be brought in)", j + 1);
+			goto out;
+		}
+		for (k = 0; k < pk.nf; k++)
+			if (!strncmp((const char *)pk.ents[2 + k] + 0x40, (const char *)e + 0x40, 32))
+			{
+				snprintf(why, why_n, "the file names \"%.31s\" twice", (const char *)e + 0x40);
+				goto out;
+			}
+		flen = le32(e + 4);
+		cl = (flen + PKG_CL - 1) / PKG_CL;
+		if (flen > (u32)(len - at))
+		{
+			snprintf(why, why_n, "the file ends inside \"%.31s\"", (const char *)e + 0x40);
+			goto out;
+		}
+		o = pk.ents[2 + pk.nf];
+		memcpy(o, e, 512);
+		put32(o + 0x10, 0);
+		put32(o + 0x14, 0);
+		if (cl)
+		{
+			u32 have = (u32)(len - at) < cl * PKG_CL ? (u32)(len - at) : cl * PKG_CL;	/* the last file's filling may be cut short */
+
+			pk.data[pk.nf] = (u8 *)calloc(cl, PKG_CL);
+			if (!pk.data[pk.nf])
+			{
+				snprintf(why, why_n, "out of memory");
+				goto out;
+			}
+			memcpy(pk.data[pk.nf], d + at, have);
+			pk.ncl[pk.nf] = cl;
+			at += have;
+		}
+		pk.nf++;
+	}
+	r = pkg_to_card(&pk, to, why, why_n);
+out:
+	free(d);
+	pkg_free(&pk);
+	return r;
 }
 
 static int delete_ps2(card_t *c, save_t *s, char *why, int why_n)

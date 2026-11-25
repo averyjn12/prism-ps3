@@ -18,6 +18,7 @@
 #include "launch.h"
 #include "storage.h"	/* v0.64: ST_DEV_MS / ST_DEV_CF for the PS2 header */
 #include "cardcheck.h"	/* v0.65: a slot that gives damaged data */
+#include "played.h"	/* v0.67: Continue, and "played N times" */
 
 #define QUERY_MAX	16
 
@@ -32,6 +33,28 @@ static int kx, ky;
 static char note[120];
 static int note_frames;
 static unsigned pan_t0;
+static void played_words(char *out, unsigned n, int p, const game_t *g);	/* v0.67, with Continue below */
+/* v0.67: marked games (R2 in a list), to copy several in one go (rip.c copy_games). A mark belongs to a
+ * place in games[plat]: the marks go when the list is left or built again. */
+static unsigned char mark[MAX_GAMES];
+static int n_mark;
+
+static void marks_clear(void)
+{
+	memset(mark, 0, sizeof mark);
+	n_mark = 0;
+}
+
+int ui_marked(void *outv, int max)
+{
+	game_t *out = (game_t *)outv;
+	int k, n = 0;
+
+	for (k = 0; k < n_games[plat] && n < max; k++)
+		if (mark[k])
+			out[n++] = games[plat][k];
+	return n;
+}
 static u32 *bg;			/* the backdrop's still part, drawn once */
 
 static const char *const plat_name[N_PLAT] = { "PS1", "PS2", "PS3", "PSP" };
@@ -146,16 +169,19 @@ void backdrop(void)
 	float t = (float)frame / 60.0f, wrap = LX1 - LX0 + 60.0f;
 	int i;
 
-	if (!bg)
+	if (GFX_GPU || !bg)
 	{
 		/* the still part once: the dark, and two soft lights, blue from the top left and violet
-		 * from the bottom right (to the canvas's own edges; the PS2 program's 640 is narrower) */
+		 * from the bottom right (to the canvas's own edges; the PS2 program's 640 is narrower).
+		 * v0.67: every frame when the RSX draws (gfx.h): it costs the RSX nothing, and there is no
+		 * canvas to keep a copy of */
 		ui_clear(VOID);
 		quad(LX0, 0.0f, 420.0f, 0.0f, LX0, 300.0f, 420.0f, 300.0f,
 			RGBA(0x1A, 0x2A, 0x6A, 0x78), RGBA(0x1A, 0x2A, 0x6A, 0x00), RGBA(0x1A, 0x2A, 0x6A, 0x00), RGBA(0x1A, 0x2A, 0x6A, 0x00));
 		quad(260.0f, 180.0f, LX1, 180.0f, 260.0f, 448.0f, LX1, 448.0f,
 			RGBA(0x2A, 0x15, 0x52, 0x00), RGBA(0x2A, 0x15, 0x52, 0x00), RGBA(0x2A, 0x15, 0x52, 0x00), RGBA(0x2A, 0x15, 0x52, 0x78));
-		bg = (u32 *)malloc(CW * CH * 4);
+		if (!GFX_GPU)
+			bg = (u32 *)malloc(CW * CH * 4);
 		if (bg)
 			memcpy(bg, fb, CW * CH * 4);
 	}
@@ -426,6 +452,16 @@ static void carousel(void)
 
 				mirror(g, cx, ROW_Y + s / 2 + (big ? 9.0f : 3.0f), s, a);
 				jacket(g, cx, ROW_Y, s, a, big);
+				if (mark[view[i]])
+				{
+					/* v0.67: marked: a tick in a bright corner */
+					float m = s * 0.22f, bx = cx + s / 2 - m, by = ROW_Y - s / 2;
+					int al = (int)(a * 0x80);
+
+					rect(bx, by, bx + m, by + m, RGBA(0x7F, 0xE3, 0xFF, al));
+					line(bx + m * 0.22f, by + m * 0.52f, bx + m * 0.42f, by + m * 0.72f, RGBA(0x06, 0x0A, 0x1A, al));
+					line(bx + m * 0.42f, by + m * 0.72f, bx + m * 0.80f, by + m * 0.28f, RGBA(0x06, 0x0A, 0x1A, al));
+				}
 			}
 		}
 	}
@@ -503,11 +539,13 @@ enum { GM_BROWSE, GM_OPTIONS, GM_ASK1, GM_ASK2 };
 /* v0.56: a PS2 game on the card: copy it to the hard disk, put it in / take it out of webMAN's list */
 /* v0.58: a wrong cover can be removed for good, and a removed one allowed back (covers.c covers_mark) */
 /* v0.61: a PSP game's own launcher (launch.c psp_launcher_*), when both are installed */
+/* v0.67: with games marked, Square is about the marked games */
 enum { OPT_ADD_SC, OPT_DEL_SC, OPT_RIP, OPT_COPY, OPT_DELETE, OPT_CANCEL, OPT_COPY_HDD, OPT_WM_ADD, OPT_WM_DEL, OPT_COV_DEL, OPT_COV_ALLOW,
-	OPT_PSPL_REM, OPT_PSPL_MIN };
+	OPT_PSPL_REM, OPT_PSPL_MIN, OPT_COPY_MARKED, OPT_CLEAR_MARKS, OPT_PSPL_PPS };
 static const char *const opt_text[] = { "Add to this list", "Remove from this list", "Copy the disc to a storage device",
 	"Copy to another device", "Delete", "Cancel", "Copy to the hard disk", "Add to webMAN's list", "Remove from webMAN's list",
-	"Remove its cover", "Let Game covers find its cover", "Start it with the Remaster launcher", "Start it with the Minis launcher" };
+	"Remove its cover", "Let Game covers find its cover", "Start it with the Remaster launcher", "Start it with the Minis launcher",
+	"Copy the marked games", "Take the marks off", "Open it in PPSSPP" };
 static int gm_mode, gm_pick, gm_n, gm_opt[8];
 static unsigned gm_at;
 static char gm_what[160];
@@ -516,6 +554,16 @@ static char gm_what[160];
 static void gm_options(const game_t *g)
 {
 	gm_n = 0;
+	if (n_mark)
+	{
+		/* v0.67 */
+		gm_opt[gm_n++] = OPT_COPY_MARKED;
+		gm_opt[gm_n++] = OPT_CLEAR_MARKS;
+		gm_opt[gm_n++] = OPT_CANCEL;
+		gm_pick = 0;
+		gm_mode = GM_OPTIONS;
+		return;
+	}
 	if (g->kind >= 4)
 	{
 		gm_opt[gm_n++] = g->shortcut ? OPT_DEL_SC : OPT_ADD_SC;
@@ -539,8 +587,21 @@ static void gm_options(const game_t *g)
 		gm_opt[gm_n++] = OPT_COV_DEL;
 	else if (art_refused(g->id))
 		gm_opt[gm_n++] = OPT_COV_ALLOW;
-	if (plat == P_PSP && g->kind < 4 && psp_launchers_installed() == (PSPL_MINIS_ | PSPL_REMASTER))
-		gm_opt[gm_n++] = psp_launcher_for(g) == PSPL_REMASTER ? OPT_PSPL_MIN : OPT_PSPL_REM;
+	if (plat == P_PSP && g->kind < 4)
+	{
+		/* v0.61: the other launcher; v0.69: every installed launcher but the one it uses now (PPSSPP too) */
+		int have = psp_launchers_installed(), now = psp_launcher_for(g);
+
+		if (have & (have - 1))
+		{
+			if ((have & PSPL_REMASTER) && now != PSPL_REMASTER && gm_n < 6)
+				gm_opt[gm_n++] = OPT_PSPL_REM;
+			if ((have & PSPL_MINIS_) && now != PSPL_MINIS_ && gm_n < 6)
+				gm_opt[gm_n++] = OPT_PSPL_MIN;
+			if ((have & PSPL_PPSSPP) && now != PSPL_PPSSPP && gm_n < 7)
+				gm_opt[gm_n++] = OPT_PSPL_PPS;
+		}
+	}
 	gm_opt[gm_n++] = OPT_CANCEL;
 	gm_pick = gm_n - 1;		/* starts on "Cancel" */
 	gm_mode = GM_OPTIONS;
@@ -588,8 +649,11 @@ static void gm_overlay(const game_t *g)
 		int y0 = 130, h = 52 + 36 * gm_n;
 
 		sheet(146.0f, (float)y0, 494.0f, (float)(y0 + h));
-		fit(ln, sizeof ln, F_SMALL, g->shown, 320);
-		text_centre(F_SMALL, 320, y0 + 14, 1, DIM, ln);
+		if (n_mark)
+			snprintf(ln, sizeof ln, "%d GAME%s MARKED", n_mark, n_mark == 1 ? "" : "S");
+		else
+			fit(ln, sizeof ln, F_SMALL, g->shown, 320);
+		text_centre(F_SMALL, 320, y0 + 14, 1, n_mark ? GLOW : DIM, ln);
 		for (k = 0; k < gm_n; k++)
 		{
 			int y = y0 + 48 + 36 * k, on = gm_pick == k;
@@ -670,7 +734,10 @@ static void draw_games(void)
 	}
 	else
 	{
-		snprintf(ln, sizeof ln, " " DOT " %d GAME%s " DOT " A-Z", n_games[plat], n_games[plat] == 1 ? "" : "S");
+		if (n_mark)	/* v0.67 */
+			snprintf(ln, sizeof ln, " " DOT " %d GAME%s " DOT " %d MARKED", n_games[plat], n_games[plat] == 1 ? "" : "S", n_mark);
+		else
+			snprintf(ln, sizeof ln, " " DOT " %d GAME%s " DOT " A-Z", n_games[plat], n_games[plat] == 1 ? "" : "S");
 		/* v0.64: the slot the card was really found in (Bananafuzzbuddy 11-24: it said SD CARD with the card in CF) */
 		top_right(plat != P_PS2 ? "ALL DEVICES" : ps2_where(), AMBER, ln, DIM);
 	}
@@ -700,7 +767,15 @@ static void draw_games(void)
 	else
 		snprintf(ln, sizeof ln, "%s " DOT " %s", kind_name(g), size);
 	text_centre(F_SMALL, 320, 306, 1, DIM, ln);
-	snprintf(ln, sizeof ln, "%d OF %d", sel + 1, n_view);
+	{
+		char pw[80];
+
+		played_words(pw, sizeof pw, plat, g);	/* v0.67 */
+		if (pw[0])
+			snprintf(ln, sizeof ln, "%d OF %d " DOT " %s", sel + 1, n_view, pw);
+		else
+			snprintf(ln, sizeof ln, "%d OF %d", sel + 1, n_view);
+	}
 	text_centre(F_SMALL, 320, 325, 1, FAINT, ln);
 	if (note_frames > 0)
 		text_centre(F_SMALL, 320, 376, 0, AMBER, note);
@@ -708,11 +783,20 @@ static void draw_games(void)
 		letter_strip();
 	legend_line();
 	x = legend_item(LEFT, IC_CROSS, NULL, "Play");
-	x = legend_item(x, IC_SQUARE, NULL, "Options");
+	if (n_mark)
+	{
+		/* v0.67: Square is about the marked games now */
+		char t[24];
+
+		snprintf(t, sizeof t, "Copy %d marked", n_mark);
+		x = legend_item(x, IC_SQUARE, NULL, t);
+	}
+	else
+		x = legend_item(x, IC_SQUARE, NULL, "Options");
 	x = legend_item(x, IC_CIRCLE, NULL, "Menu");
 	x = legend_item(x, IC_TRIANGLE, NULL, query[0] ? "Search again" : "Search");
 	x = legend_item(x, -1, "L1 R1", "Letter");
-	legend_item(x, -1, "SELECT", "Rescan");
+	legend_item(x, -1, "R2", mark[view[sel]] ? "Unmark" : "Mark");	/* v0.67: took SELECT Rescan's place (it still works, and HOME shows it) */
 	gm_overlay(g);
 }
 
@@ -843,6 +927,67 @@ void card_shape(float cx, float cy, float w, float h, int al)
 #define T_SET	-2
 static const int tile_plat[TILES] = { P_PS1, P_PS2, P_PSP, P_PS3, T_MC, T_SET };	/* v0.16: in release order */
 static int home_ask, home_yes, home_asked;
+
+/* v0.67: Continue. The game started last from Prism that is in the lists now: its platform and its place
+ * in games[]; cont_p -1 = none (nothing played yet, or none of the played games is here). Found again
+ * after every scan (ui_prepare). A disc shortcut whose disc is out is passed over: it cannot start. */
+unsigned long long ui_now_s;
+static int cont_p = -1, cont_i;
+/* v0.72 (Bananafuzzbuddy, 11-25: "make the continue list just 5 games big ... once a new game comes in the 5th last
+ * played game leaves"): the five games started last that are in the lists now, the latest first. Triangle
+ * on the home screen opens them; cont_p / cont_i stay the first, for the LAST PLAYED line. */
+#define CONT_MAX	5
+static int cont_n, cont_pl[CONT_MAX], cont_ix[CONT_MAX], cont_open, cont_sel;
+
+static void find_continue(void)
+{
+	const played_t *e;
+	int k, i;
+
+	cont_p = -1;
+	cont_n = 0;
+	for (k = 0; cont_n < CONT_MAX && (e = played_recent(k)) != NULL; k++)
+	{
+		if (e->plat >= N_PLAT)
+			continue;
+		for (i = 0; i < n_games[e->plat]; i++)
+			if (games[e->plat][i].kind != 5 && !strcmp(games[e->plat][i].name, e->name))
+			{
+				cont_pl[cont_n] = e->plat;
+				cont_ix[cont_n] = i;
+				cont_n++;
+				break;
+			}
+	}
+	if (cont_n)
+	{
+		cont_p = cont_pl[0];
+		cont_i = cont_ix[0];
+	}
+	else
+		cont_open = 0;
+	if (cont_sel >= cont_n)
+		cont_sel = 0;
+}
+
+/* "PLAYED 3 TIMES . 2 HOURS AGO" for a game, or empty when it was never started from Prism */
+static void played_words(char *out, unsigned n, int p, const game_t *g)
+{
+	const played_t *e = played_find(p, g->name);
+	char ago[40];
+
+	out[0] = 0;
+	if (!e)
+		return;
+	played_ago(ago, sizeof ago, e->last, ui_now_s);
+	if (e->count == 1)
+		snprintf(out, n, "PLAYED ONCE%s%s", ago[0] ? " " DOT " " : "", ago);
+	else
+		snprintf(out, n, "PLAYED %u TIMES%s%s", e->count, ago[0] ? " " DOT " " : "", ago);
+	for (; *out; out++)
+		if (*out >= 'a' && *out <= 'z')
+			*out -= 32;
+}
 static void enter_list(int p);
 
 static void draw_home(void)
@@ -895,10 +1040,29 @@ static void draw_home(void)
 	}
 	if (note_frames > 0)
 		text_centre(F_SMALL, 320, 352, 0, AMBER, note);
+	else if (cont_p >= 0)
+	{
+		/* v0.67: what Triangle starts again */
+		const game_t *g = &games[cont_p][cont_i];
+		const played_t *e = played_find(cont_p, g->name);
+		char ago[40], ttl[60], ln[160];
+		int w, x;
+
+		ago[0] = 0;
+		if (e)
+			played_ago(ago, sizeof ago, e->last, ui_now_s);
+		fit(ttl, sizeof ttl, F_SMALL, g->shown, 300);
+		snprintf(ln, sizeof ln, "%s " DOT " %s%s%s", ttl, plat_name[cont_p], ago[0] ? " " DOT " " : "", ago);
+		w = text_w(F_SMALL, "LAST PLAYED", 2) + 12 + text_w(F_SMALL, ln, 0);
+		x = text_ex(F_SMALL, 320 - w / 2, 352, 1.0f, 2, FAINT, "LAST PLAYED") + 10;
+		text(F_SMALL, x, 352, DIM, ln);
+	}
 	legend_line();
 	{
 		int x = legend_item(LEFT, IC_CROSS, NULL, "Open");
 
+		if (cont_p >= 0)
+			x = legend_item(x, IC_TRIANGLE, NULL, "Continue");	/* opens the last five played */
 		x = legend_item(x, IC_CIRCLE, NULL, "Quit");
 		x = legend_item(x, IC_SQUARE, NULL, "Copy disc");
 		legend_item(x, -1, "SELECT", "Rescan");
@@ -912,6 +1076,35 @@ static void draw_home(void)
 		text_centre(F_SMALL, 320, 206, 0, DIM, "and copies its PS2 helper and launcher image to the hard disk.");
 		text_centre(F_SMALL, 320, 228, 0, GLOW, "Your own lines stay as they are. Nothing goes to flash.");
 		two_buttons(266, home_yes, "Not now", "Set up", home_yes ? INK : DIM);
+	}
+	if (cont_open && cont_n)
+	{
+		/* v0.72: the last five played. Each row: the game, its platform, how long ago */
+		int y0 = 116, h = 68 + 36 * cont_n, k;
+
+		sheet(96.0f, (float)y0, 544.0f, (float)(y0 + h));
+		text_centre(F_SMALL, 320, y0 + 14, 3, DIM, "CONTINUE");
+		for (k = 0; k < cont_n; k++)
+		{
+			const game_t *g = &games[cont_pl[k]][cont_ix[k]];
+			const played_t *e = played_find(cont_pl[k], g->name);
+			char ago[40], ttl[80], rt[80];
+			int y = y0 + 46 + 36 * k, on = cont_sel == k;
+
+			ago[0] = 0;
+			if (e)
+				played_ago(ago, sizeof ago, e->last, ui_now_s);
+			snprintf(rt, sizeof rt, "%s%s%s", plat_name[cont_pl[k]], ago[0] ? " " DOT " " : "", ago);
+			fit(ttl, sizeof ttl, F_BODY, g->shown, 408 - text_w(F_SMALL, rt, 0) - 16);
+			if (on)
+			{
+				rect(112.0f, (float)y - 5.0f, 528.0f, (float)y + 23.0f, RGBA(0x7F, 0xE3, 0xFF, 0x1C));
+				frame_rect(112.0f, (float)y - 5.0f, 528.0f, (float)y + 23.0f, 1.0f, GLOW);
+			}
+			text(F_BODY, 124, y, on ? INK : DIM, ttl);
+			text(F_SMALL, 516 - text_w(F_SMALL, rt, 0), y + 3, on ? DIM : FAINT, rt);
+		}
+		text_centre(F_SMALL, 320, y0 + h - 22, 0, FAINT, "Cross starts it " DOT " Circle closes");
 	}
 }
 
@@ -1067,6 +1260,7 @@ void ui_prepare(void)
 {
 	int p, i;
 
+	marks_clear();	/* v0.67: the lists are sorted again below: a mark's place means nothing after it */
 	for (p = 0; p < N_PLAT; p++)
 	{
 		for (i = 0; i < n_games[p]; i++)
@@ -1082,6 +1276,7 @@ void ui_prepare(void)
 		if (!n_view)
 			screen = SCR_GAMES;
 	}
+	find_continue();	/* v0.67: after the sort: cont_i is a place in the sorted list */
 }
 
 static void jump_letter(int dir)
@@ -1162,6 +1357,23 @@ void ui_draw(void)
 		note_frames--;
 }
 
+/* v0.72: a number that changes whenever what the pad moves on the screen changes: which screen, which
+ * tile, game, row, key, question or answer. main.c plays a sound when a press changed it. */
+unsigned ui_nav_sig(void)
+{
+	unsigned h = (unsigned)screen * 31u + (unsigned)plat;
+
+	h = h * 131u + (unsigned)home_sel;
+	h = h * 131u + (unsigned)sel;
+	h = h * 131u + (unsigned)(gm_mode * 16 + gm_pick);
+	h = h * 131u + (unsigned)(kx * 16 + ky);
+	h = h * 131u + (unsigned)(home_ask * 2 + home_yes) + (unsigned)(cont_open * 64 + cont_sel * 8);
+	h = h * 131u + (unsigned)n_mark + (unsigned)strlen(query) * 7u;
+	h = h * 131u + mc_nav_sig();
+	h = h * 131u + settings_nav_sig();
+	return h;
+}
+
 const void *ui_chosen(void)
 {
 	return n_view ? vg(sel) : NULL;
@@ -1220,6 +1432,7 @@ static void search_pad(unsigned pressed)
 
 static void enter_list(int p)
 {
+	marks_clear();	/* v0.67 */
 	plat = p;
 	query[0] = 0;
 	gm_mode = GM_BROWSE;
@@ -1259,6 +1472,34 @@ int ui_pad(unsigned pressed, unsigned held)
 		}
 		return DO_NOTHING;
 	}
+	if (screen == SCR_HOME && cont_open)
+	{
+		/* v0.72: the last five played */
+		if (!cont_n || (pressed & PAD_CIRCLE))
+			cont_open = 0;
+		else if (pressed & PAD_UP)
+			cont_sel = cont_sel ? cont_sel - 1 : cont_n - 1;
+		else if (pressed & PAD_DOWN)
+			cont_sel = cont_sel < cont_n - 1 ? cont_sel + 1 : 0;
+		else if (pressed & (PAD_CROSS | PAD_TRIANGLE))
+		{
+			/* open that game's list on it and start it, as X there would. Whatever stops a start (PS2 setup
+			 * not done, a bad card slot) is then said on that screen, the game chosen. */
+			int cp = cont_pl[cont_sel], ci = cont_ix[cont_sel], k;
+
+			cont_open = 0;
+			enter_list(cp);
+			for (k = 0; k < n_view; k++)
+				if (view[k] == ci)
+				{
+					sel = k;
+					pos = (float)sel;
+					sel_of[plat] = view[sel];
+					return DO_START;
+				}
+		}
+		return DO_NOTHING;
+	}
 	if (screen == SCR_HOME)
 	{
 		if (pressed & PAD_LEFT)
@@ -1271,6 +1512,13 @@ int ui_pad(unsigned pressed, unsigned held)
 			return DO_RIP;
 		if (pressed & PAD_CIRCLE)
 			return DO_QUIT;
+		if ((pressed & PAD_TRIANGLE) && cont_n)
+		{
+			/* v0.67: Continue. v0.72: a list of the last five; Triangle again (or Cross) starts the latest */
+			cont_open = 1;
+			cont_sel = 0;
+			return DO_NOTHING;
+		}
 		if (pressed & PAD_CROSS)
 		{
 			if (tile_plat[home_sel] == T_MC)
@@ -1324,8 +1572,10 @@ int ui_pad(unsigned pressed, unsigned held)
 		else if (pressed & PAD_CROSS)
 		{
 			static const int act[] = { DO_SC_ADD, DO_SC_DEL, DO_RIP, DO_COPYGAME, DO_DELETE_ASK, DO_NOTHING,
-				DO_COPYGAME, DO_WM_ADD, DO_WM_DEL, DO_COV_DEL, DO_COV_ALLOW, DO_PSPL_REM, DO_PSPL_MIN };
+				DO_COPYGAME, DO_WM_ADD, DO_WM_DEL, DO_COV_DEL, DO_COV_ALLOW, DO_PSPL_REM, DO_PSPL_MIN, DO_COPYMARKED, DO_NOTHING, DO_PSPL_PPS };
 
+			if (gm_opt[gm_pick] == OPT_CLEAR_MARKS)
+				marks_clear();	/* v0.67 */
 			gm_mode = GM_BROWSE;
 			sel_of[plat] = n_view ? view[sel] : 0;
 			return act[gm_opt[gm_pick]];
@@ -1376,6 +1626,17 @@ int ui_pad(unsigned pressed, unsigned held)
 		jump_letter(-1);
 	if (pressed & PAD_R1)
 		jump_letter(1);
+	if (pressed & PAD_R2)
+	{
+		/* v0.67: mark this game (or take its mark off). A disc in the drive is copied on its own. */
+		if (vg(sel)->kind >= 4)
+			ui_say("A disc is copied on its own: Square, then Copy the disc.");
+		else
+		{
+			mark[view[sel]] ^= 1;
+			n_mark += mark[view[sel]] ? 1 : -1;
+		}
+	}
 	if (pressed & PAD_SQUARE)
 		gm_options(vg(sel));
 	else if (pressed & PAD_TRIANGLE)

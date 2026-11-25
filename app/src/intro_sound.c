@@ -13,15 +13,12 @@
 #include <lv2/sysfs.h>
 #include "intro_synth.h"
 #include "intro_sound.h"
+#include "sfx.h"
 
 #define RATE	48000
 
 static float *pcm;
-static int n_frames, pos, opened;
-static volatile int running, fading;
-static u32 port;
-static audioPortConfig cfg;
-static sys_ppu_thread_t th;
+static int n_frames;
 
 /* v0.32: computing it took 1.2 s on the console (prism_intro.log 11-23), all of it before the intro
  * could start; the package now carries it, rendered on the PC by the same code (host/introwav.c,
@@ -64,104 +61,27 @@ int intro_sound_prepare(void)
 	return 0;
 }
 
-static void feeder(void *arg)
-{
-	volatile u64 *ri = (volatile u64 *)(u64)cfg.readIndex;
-	float *base = (float *)(u64)cfg.audioDataStart, g = 1.0f;
-	u64 nb = cfg.numBlocks, next = (*ri + 1) % nb;
-	int after = 0, i;
-
-	(void)arg;
-	while (running)
-	{
-		u64 cur = *ri;
-
-		while (next != cur)
-		{
-			float *b = base + next * 2 * AUDIO_BLOCK_SAMPLES;
-
-			for (i = 0; i < AUDIO_BLOCK_SAMPLES; i++)
-			{
-				float l = 0.0f, r = 0.0f;
-
-				if (pos < n_frames)
-				{
-					l = pcm[2 * pos];
-					r = pcm[2 * pos + 1];
-					pos++;
-				}
-				if (fading && g > 0.0f)
-					g -= 1.0f / (RATE * 0.15f);
-				if (g < 0.0f)
-					g = 0.0f;
-				b[2 * i] = l * g;
-				b[2 * i + 1] = r * g;
-			}
-			if (pos >= n_frames || g <= 0.0f)
-				after++;
-			next = (next + 1) % nb;
-		}
-		if (after > (int)nb + 2)
-			break;		/* every real block has been played */
-		usleep(2000);
-	}
-	sysThreadExit(0);
-}
-
+/* v0.72: the port and its thread are sfx.c's now and stay open for the menu sounds; the opening is its
+ * "music". Nothing waits for it to end: intro_sound_tidy() frees it once the mixer has let go of it. */
 int intro_sound_play(void)
 {
-	audioPortParam p;
-
 	if (!pcm)
 		return -1;
-	sysModuleLoad(SYSMODULE_AUDIO);
-	if (audioInit() != 0)
-		return -2;
-	memset(&p, 0, sizeof p);
-	p.numChannels = AUDIO_PORT_2CH;
-	p.numBlocks = AUDIO_BLOCK_16;
-	p.attrib = AUDIO_PORT_INITLEVEL;
-	p.level = 1.0f;
-	if (audioPortOpen(&p, &port) != 0)
-	{
-		audioQuit();
-		return -3;
-	}
-	if (audioGetPortConfig(port, &cfg) != 0 || audioPortStart(port) != 0)
-	{
-		audioPortClose(port);
-		audioQuit();
-		return -4;
-	}
-	running = 1;
-	opened = 1;
-	if (sysThreadCreate(&th, feeder, NULL, 500, 0x4000, THREAD_JOINABLE, (char *)"prism_intro_sound") != 0)
-	{
-		running = 0;
-		audioPortStop(port);
-		audioPortClose(port);
-		audioQuit();
-		opened = 0;
-		return -5;
-	}
-	return 0;
+	sound_music(pcm, n_frames);
+	return sound_music_done() ? -2 : 0;	/* done at once = there is no port */
 }
 
 void intro_sound_end(int quick)
 {
-	u64 rv;
+	if (quick)
+		sound_music_fade();
+}
 
-	if (opened)
+void intro_sound_tidy(void)
+{
+	if (pcm && sound_music_done())
 	{
-		if (quick)
-			fading = 1;
-		sysThreadJoin(th, &rv);
-		running = 0;
-		audioPortStop(port);
-		audioPortClose(port);
-		audioQuit();
-		opened = 0;
+		free(pcm);
+		pcm = NULL;
 	}
-	free(pcm);
-	pcm = NULL;
 }

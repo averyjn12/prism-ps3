@@ -21,6 +21,11 @@
 #include "screens.h"
 #include "dirlist.h"
 #include "cardcheck.h"	/* v0.65 */
+#include "exfat_w.h"	/* v0.73 */
+#include "exfat_card.h"
+#include "version.h"
+
+extern u32 exc_writes, exc_errs;	/* exfat_card.c */
 
 int app_events(void);	/* main.c: the system's events; 1 = asked to quit */
 
@@ -31,6 +36,7 @@ int app_events(void);	/* main.c: the system's events; 1 = asked to quit */
 static char del_list[MAX_DEL][256];
 static int n_del, del_dirs;
 static u64 del_bytes;
+static int del_exfat;	/* v0.73: the game is one file on a card's exFAT part: deleted by Prism's own exFAT writer */
 
 /* ---- webMAN: is a game mounted over the drive? ---- */
 
@@ -266,6 +272,7 @@ static int plan(int plat, const game_t *g, char *why, int n)
 
 	n_del = del_dirs = 0;
 	del_bytes = 0;
+	del_exfat = 0;
 	if (g->kind == 4 || g->kind == 5)
 	{
 		snprintf(why, n, "That is the disc (or its shortcut): nothing on a storage device to delete");
@@ -294,11 +301,27 @@ static int plan(int plat, const game_t *g, char *why, int n)
 		}
 		return n_del ? 0 : -7;
 	}
+	if (plat == P_PS2 && g->where == 1 && g->exfat)
+	{
+		/* v0.73 (Bananafuzzbuddy, 11-25: "if a game is in an exfat partition I can't delete it? ... i obviously can see
+		 * it and transfer it"). GameOS cannot change exFAT; Prism's own writer can take a file out
+		 * (exfat_w.c exw_delete, judged on the PC by fsck.exfat and exfat-fuse: host/exd_test.sh). */
+		del_exfat = 1;
+		n_del = 1;
+		del_bytes = g->size;
+		return 0;
+	}
 	if (plat == P_PS2)
 	{
-		static const char *const dirs[] = { "/dev_sd/PS2ISO", "/dev_sd/PS2PRISM" };
+		/* v0.73: on the game's OWN card. Up to v0.72 this looked on /dev_sd whatever slot the game was in,
+		 * so a game on the Memory Stick could have deleted the SD card's file of the same name. */
+		static const char *const slot_dev_[3] = { "/dev_ms", "/dev_sd", "/dev_cf" };
+		static const char *const subs[] = { "PS2ISO", "PS2PRISM" };
+		char dirs[2][40];
 		int d;
 
+		for (d = 0; d < 2; d++)
+			snprintf(dirs[d], sizeof dirs[d], "%s/%s", slot_dev_[g->where == 1 && g->slot < 3 ? g->slot : 1], subs[d]);
 		for (d = 0; d < 2 && !n_del; d++)
 		{
 			char p[300];
@@ -317,7 +340,7 @@ static int plan(int plat, const game_t *g, char *why, int n)
 		}
 		if (!n_del)
 		{
-			snprintf(why, n, "It is on the card's exFAT part, which the PS3 cannot change: delete it on a PC");
+			snprintf(why, n, "Its file was not found on the card");
 			return -2;
 		}
 		return 0;
@@ -421,7 +444,9 @@ int game_del_plan(int plat, const game_t *g, char *what, int n)
 	if (r)
 		return r;
 	fmt_size(sz, sizeof sz, del_bytes);
-	if (del_dirs)
+	if (del_exfat)
+		snprintf(what, n, "1 file, %s, from the %s card's exFAT part", sz, slot_name(g->slot));
+	else if (del_dirs)
 		snprintf(what, n, "%d files in %d folders, %s, from %s", n_del, del_dirs + 1, sz, dev_word(g->path));
 	else
 		snprintf(what, n, "%d file%s, %s, from %s", n_del, n_del == 1 ? "" : "s", sz, dev_word(g->path));
@@ -477,6 +502,58 @@ static void rm_tree(const char *dir, int depth)
 		failed++;
 }
 
+/* v0.73: one game file on a card's exFAT part. The card's slot passed the damage check (the caller's
+ * slot_bad_msg); the writer checks the volume and the file before its first write and says why it will not.
+ * A game kept in parts (name.0, name.1 ...) goes part by part. */
+static int exfat_delete(const game_t *g, char *msg, int n)
+{
+	static const char *const subs[] = { "PS2ISO", "PS2PRISM" };
+	u64 dev_was = card_dev;
+	exw_dev dv;
+	char why[200], part[130];
+	FILE *lg = fopen("/dev_hdd0/tmp/prism_rip.log", "a");
+	int r = -1, d, k, parts = 0;
+
+	why[0] = 0;
+	card_dev = slot_storage(g->slot);	/* exc_open opens card_dev: this game's slot, not the first card read */
+	if (exc_open(&dv, why, sizeof why) == 0)
+	{
+		for (d = 0; d < 2 && r == -1; d++)
+			r = exw_delete(&dv, subs[d], g->name, why, sizeof why);
+		if (lg)
+			fprintf(lg, "=== delete from exFAT, app v%s: slot %s, %s: %d (%s), %u writes, %u errors\n", APP_VERSION, slot_name(g->slot), g->name, r, why,
+				(unsigned)exc_writes, (unsigned)exc_errs);
+		if (r == -1 && !strcmp(why, "no file with that name is there"))
+		{
+			/* in parts */
+			for (d = 0; d < 2 && !parts; d++)
+				for (k = 0; k < 64; k++)
+				{
+					snprintf(part, sizeof part, "%s.%d", g->name, k);
+					r = exw_delete(&dv, subs[d], part, why, sizeof why);
+					if (lg)
+						fprintf(lg, "  part %s/%s: %d (%s)\n", subs[d], part, r, why);
+					if (r)
+						break;
+					parts++;
+				}
+			if (parts && r == -1 && !strcmp(why, "no file with that name is there"))
+				r = 0;		/* the part after the last */
+		}
+		exc_close();
+	}
+	card_dev = dev_was;
+	if (lg)
+		fclose(lg);
+	if (r == 0)
+		snprintf(msg, n, "Deleted %s.", g->shown);
+	else if (r == -2 || parts)
+		snprintf(msg, n, "%s is gone, but not cleanly: %s.", g->shown, why);
+	else
+		snprintf(msg, n, "Not deleted: %s.", why);
+	return r;
+}
+
 int game_delete(unsigned (*pad)(void), int plat, const game_t *g, char *msg, int n)
 {
 	char why[200];
@@ -498,6 +575,8 @@ int game_delete(unsigned (*pad)(void), int plat, const game_t *g, char *msg, int
 	del_pad = pad;
 	pad_was = pad ? pad() : 0;	/* the Cross that said "Delete" is not a Circle */
 	tick("DELETING", 0.0f, "starting", 1);
+	if (del_exfat)
+		return exfat_delete(g, msg, n);
 	if (plat == P_PS3 && g->kind == 3)
 		rm_tree(g->path, 0);
 	else

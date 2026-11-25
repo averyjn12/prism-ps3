@@ -62,6 +62,49 @@ int main(int argc, char **argv)
 		fclose(o);
 		return 0;
 	}
+	if (argc == 3 && !strcmp(argv[1], "--space"))
+	{
+		/* v0.73: --space <image>: "free total" of the exFAT volume, bytes */
+		uint64_t fr = 0, tot = 0;
+
+		img = fopen(argv[2], "rb");
+		if (!img)
+			return 3;
+		fseeko(img, 0, SEEK_END);
+		d.rd = rd;
+		d.wr = wr;
+		d.ctx = NULL;
+		d.sectors = (uint32_t)(ftello(img) / 512);
+		r = exw_space(&d, &fr, &tot, why, sizeof why);
+		printf("%llu %llu %s\n", (unsigned long long)fr, (unsigned long long)tot, why);
+		fclose(img);
+		return r ? 1 : 0;
+	}
+	if (argc == 5 && (!strcmp(argv[1], "--del") || !strcmp(argv[1], "--free")))
+	{
+		/* v0.73: --del <image> <folder> <name>: delete it. --free <image> <folder> <unused name>: only say
+		 * how much is free (exw_begin for a 1-byte file, then given up: nothing is written) */
+		img = fopen(argv[2], "r+b");
+		if (!img)
+			return 3;
+		fseeko(img, 0, SEEK_END);
+		d.rd = rd;
+		d.wr = wr;
+		d.ctx = NULL;
+		d.sectors = (uint32_t)(ftello(img) / 512);
+		if (!strcmp(argv[1], "--free"))
+		{
+			r = exw_begin(&d, argv[3], argv[4], 1, why, sizeof why);
+			printf("%llu\n", (unsigned long long)exw_free_bytes());
+			exw_abort();
+			fclose(img);
+			return r ? 1 : 0;
+		}
+		r = exw_delete(&d, argv[3], argv[4], why, sizeof why);
+		printf("delete %d: %s (free %llu bytes)\n", r, why, (unsigned long long)exw_free_bytes());
+		fclose(img);
+		return r ? 1 : 0;
+	}
 	if (argc < 6)
 		return 2;
 	img = fopen(argv[1], "r+b");

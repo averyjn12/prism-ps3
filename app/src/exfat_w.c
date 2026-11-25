@@ -16,7 +16,8 @@
  * bitmap and the entry, only clusters marked used that nothing names (what a disk check frees).
  * Every write is checked to lie inside the exFAT volume, so nothing outside it (the card's FAT32
  * partition, the MBR) can be touched. No FAT entries, no boot sectors, no other entries are
- * written. */
+ * written.
+ * v0.73: exw_delete, at the end of this file, takes one file out again. */
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
@@ -336,6 +337,8 @@ struct find_name
 	int nofat;
 	int name_len, name_at;
 	uint16_t name[256];
+	uint64_t set_off, got_off;	/* v0.73: the File entry of the set being read / of the match, bytes into the folder */
+	int set_n, got_n;		/* entries in that set, the File entry included */
 };
 
 static int name_cb(const uint8_t *e, uint64_t off, void *arg)
@@ -343,7 +346,6 @@ static int name_cb(const uint8_t *e, uint64_t off, void *arg)
 	struct find_name *f = (struct find_name *)arg;
 	int k;
 
-	(void)off;
 	if (e[0] == 0)
 		return 1;
 	if (e[0] == 0x85)
@@ -352,6 +354,8 @@ static int name_cb(const uint8_t *e, uint64_t off, void *arg)
 		f->secs_left = e[1];
 		f->dir = (le16(e + 4) & 0x10) != 0;
 		f->name_at = 0;
+		f->set_off = off;
+		f->set_n = e[1] + 1;
 		return 0;
 	}
 	if (f->state != 1 || !(e[0] & 0x80))
@@ -379,6 +383,8 @@ static int name_cb(const uint8_t *e, uint64_t off, void *arg)
 			if (k == f->n)
 			{
 				f->got = 1;
+				f->got_off = f->set_off;
+				f->got_n = f->set_n;
 				return 1;
 			}
 		}
@@ -386,13 +392,15 @@ static int name_cb(const uint8_t *e, uint64_t off, void *arg)
 	return 0;
 }
 
-int exw_begin(const exw_dev *dev, const char *dir, const char *name, uint64_t size, char *why, int wn)
+/* What every change starts with: the volume, its up-case table, its allocation bitmap (whole, in memory)
+ * and the folder (one level under the root). Nothing is written. v0.73: out of exw_begin, for exw_delete. */
+static int prep(const exw_dev *dev, const char *dir, char *why, int wn)
 {
 	struct root_scan rs;
 	struct find_name fd;
 	uint16_t wdir[256];
 	int ndir;
-	uint64_t need, i, run = 0, best = 0;
+	uint64_t i;
 
 	exw_abort();
 	D = *dev;
@@ -411,38 +419,33 @@ int exw_begin(const exw_dev *dev, const char *dir, const char *name, uint64_t si
 		say(why, wn, "could not read the exFAT allocation bitmap or up-case table");
 		return -1;
 	}
-	ulen = to_u16(name, uname, 255);
-	ndir = to_u16(dir, wdir, 255);
-	if (ulen <= 0 || ndir <= 0)
+	if (!dir)
 	{
-		say(why, wn, "the name cannot be used on exFAT");
-		return -1;
+		/* v0.73: the root folder itself (exw_space) */
+		dir_clus = root_clus;
+		dir_len = chain_len(root_clus);
+		dir_nofat = 0;
 	}
-	/* the folder */
-	memset(&fd, 0, sizeof fd);
-	fd.w = wdir;
-	fd.n = ndir;
-	if (walk(root_clus, 0, chain_len(root_clus), name_cb, &fd) || !fd.got || !fd.dir || fd.clus < 2)
+	else
 	{
-		say(why, wn, "the folder is not on the card's exFAT part");
-		return -1;
-	}
-	dir_clus = fd.clus;
-	dir_len = fd.len;
-	dir_nofat = fd.nofat;
-	/* the name must be new there */
-	memset(&fd, 0, sizeof fd);
-	fd.w = uname;
-	fd.n = ulen;
-	if (walk(dir_clus, dir_nofat, dir_len, name_cb, &fd))
-	{
-		say(why, wn, "could not read the folder");
-		return -1;
-	}
-	if (fd.got)
-	{
-		say(why, wn, "a file with that name is already there");
-		return -1;
+		ndir = to_u16(dir, wdir, 255);
+		if (ndir <= 0)
+		{
+			say(why, wn, "the name cannot be used on exFAT");
+			return -1;
+		}
+		/* the folder */
+		memset(&fd, 0, sizeof fd);
+		fd.w = wdir;
+		fd.n = ndir;
+		if (walk(root_clus, 0, chain_len(root_clus), name_cb, &fd) || !fd.got || !fd.dir || fd.clus < 2)
+		{
+			say(why, wn, "the folder is not on the card's exFAT part");
+			return -1;
+		}
+		dir_clus = fd.clus;
+		dir_len = fd.len;
+		dir_nofat = fd.nofat;
 	}
 	/* the bitmap, whole */
 	free(bmp);
@@ -461,6 +464,36 @@ int exw_begin(const exw_dev *dev, const char *dir, const char *name, uint64_t si
 			say(why, wn, "could not read the allocation bitmap");
 			return -1;
 		}
+	}
+	return 0;
+}
+
+int exw_begin(const exw_dev *dev, const char *dir, const char *name, uint64_t size, char *why, int wn)
+{
+	struct find_name fd;
+	uint64_t need, i, run = 0, best = 0;
+
+	if (prep(dev, dir, why, wn))
+		return -1;
+	ulen = to_u16(name, uname, 255);
+	if (ulen <= 0)
+	{
+		say(why, wn, "the name cannot be used on exFAT");
+		return -1;
+	}
+	/* the name must be new there */
+	memset(&fd, 0, sizeof fd);
+	fd.w = uname;
+	fd.n = ulen;
+	if (walk(dir_clus, dir_nofat, dir_len, name_cb, &fd))
+	{
+		say(why, wn, "could not read the folder");
+		return -1;
+	}
+	if (fd.got)
+	{
+		say(why, wn, "a file with that name is already there");
+		return -1;
 	}
 	/* one free run for the whole file: the first that fits */
 	need = (size + ((uint64_t)SEC << spc_shift) - 1) >> (spc_shift + 9);
@@ -697,4 +730,151 @@ int exw_finish(char *why, int wn)
 void exw_abort(void)
 {
 	active = 0;
+}
+
+/* v0.73: take one file out of a folder (Bananafuzzbuddy, 11-25: a game on a card's exFAT part could be seen and
+ * copied but not deleted). Per the exFAT specification a file is gone when its entry set is no longer "in
+ * use" (the top bit of each entry's type cleared) and its clusters are free in the allocation bitmap; FAT
+ * entries of free clusters mean nothing and are left as they are.
+ *
+ * Everything is checked before anything is written: the name is there and is a file, and every cluster of
+ * the file is inside the volume and marked used (for a FAT chain: as many clusters as its size says, then
+ * the end mark). A file that fails this is not touched: the volume disagrees with itself, and a PC's disk
+ * check should look at it first.
+ * Order: the entry set (File entry first: a set without it is skipped by every reader), then the bitmap.
+ * Stopped between the two, the file is gone and its clusters are still marked used: space a disk check
+ * frees, never space in use that is marked free. */
+int exw_delete(const exw_dev *dev, const char *dir, const char *name, char *why, int wn)
+{
+	struct find_name fd;
+	uint64_t csz, need, k, b;
+	uint32_t c, lba;
+	uint8_t *dirty;
+	int i, j;
+
+	if (prep(dev, dir, why, wn))
+		return -1;
+	csz = (uint64_t)SEC << spc_shift;
+	ulen = to_u16(name, uname, 255);
+	if (ulen <= 0)
+	{
+		say(why, wn, "the name cannot be used on exFAT");
+		return -1;
+	}
+	memset(&fd, 0, sizeof fd);
+	fd.w = uname;
+	fd.n = ulen;
+	if (walk(dir_clus, dir_nofat, dir_len, name_cb, &fd))
+	{
+		say(why, wn, "could not read the folder");
+		return -1;
+	}
+	if (!fd.got)
+	{
+		say(why, wn, "no file with that name is there");
+		return -1;
+	}
+	if (fd.dir)
+	{
+		say(why, wn, "that is a folder, not a file");
+		return -1;
+	}
+	if (fd.got_n < 3 || fd.got_n > 19)
+	{
+		say(why, wn, "the file's folder entry is not one this writer handles");
+		return -1;
+	}
+	/* 1. its clusters, all looked at first */
+	need = (fd.len + csz - 1) / csz;
+	c = fd.clus;
+	for (k = 0; k < need; k++)
+	{
+		if (c < 2 || c >= nclus + 2 || !(bmp[(c - 2) >> 3] & (1u << ((c - 2) & 7))))
+		{
+			say(why, wn, "the file's clusters do not agree with the volume's allocation bitmap: check the card on a PC first");
+			return -1;
+		}
+		if (k + 1 < need)
+			c = fd.nofat ? c + 1 : fat_next(c);
+	}
+	if (need && !fd.nofat && fat_next(c) != 0xFFFFFFFF)
+	{
+		say(why, wn, "the file's cluster chain does not end where its size says: check the card on a PC first");
+		return -1;
+	}
+	dirty = (uint8_t *)calloc(1, (size_t)(bmp_len / SEC) + 2);
+	if (!dirty)
+	{
+		say(why, wn, "out of memory");
+		return -1;
+	}
+	/* the set as it is on the card now must be the set that was matched */
+	for (i = 0; i < fd.got_n; i++)
+	{
+		uint8_t want = i == 0 ? 0x85 : i == 1 ? 0xC0 : 0xC1;
+
+		lba = chain_lba(dir_clus, dir_nofat, fd.got_off + 32 * (uint64_t)i);
+		if (!lba || rd(lba, 1, sbuf) || sbuf[(fd.got_off + 32 * (uint64_t)i) % SEC] != want)
+		{
+			free(dirty);
+			say(why, wn, "the file's folder entry is not one this writer handles");
+			return -1;
+		}
+	}
+	/* 2. the entry set is no longer in use */
+	for (i = 0; i < fd.got_n; i = j)
+	{
+		lba = chain_lba(dir_clus, dir_nofat, fd.got_off + 32 * (uint64_t)i);
+		if (!lba || rd(lba, 1, sbuf))
+		{
+			free(dirty);
+			say(why, wn, i ? "could not read the folder (the file is gone; part of its entry is left for a disk check)" : "could not read the folder");
+			return i ? -2 : -1;
+		}
+		/* every entry of the set that falls in this sector */
+		for (j = i; j < fd.got_n && chain_lba(dir_clus, dir_nofat, fd.got_off + 32 * (uint64_t)j) == lba; j++)
+			sbuf[(fd.got_off + 32 * (uint64_t)j) % SEC] &= 0x7F;
+		if (wr(lba, 1, sbuf))
+		{
+			free(dirty);
+			say(why, wn, i ? "could not write the folder (the file is gone; part of its entry is left for a disk check)" : "could not write the folder: nothing was deleted");
+			return i ? -2 : -1;
+		}
+	}
+	/* 3. its clusters are free */
+	c = fd.clus;
+	for (k = 0; k < need; k++)
+	{
+		uint64_t bit = (uint64_t)c - 2;
+
+		bmp[bit >> 3] &= (uint8_t)~(1u << (bit & 7));
+		dirty[(bit >> 3) / SEC] = 1;
+		if (k + 1 < need)
+			c = fd.nofat ? c + 1 : fat_next(c);
+	}
+	for (b = 0; b < bmp_len; b += SEC)
+	{
+		if (!dirty[b / SEC])
+			continue;
+		lba = chain_lba(bmp_clus, 0, b);
+		if (!lba || wr(lba, 1, bmp + b))
+		{
+			free(dirty);
+			say(why, wn, "the file is deleted, but its space could not be marked free (a disk check on a PC frees it)");
+			return -2;
+		}
+	}
+	free(dirty);
+	return 0;
+}
+
+/* v0.73: how big the exFAT volume is and how much of it is free (SETTINGS' storage list: a card that is
+ * exFAT only is not mounted by the PS3, so the system cannot say). Nothing is written. */
+int exw_space(const exw_dev *dev, uint64_t *free_b, uint64_t *total_b, char *why, int wn)
+{
+	if (prep(dev, NULL, why, wn))
+		return -1;
+	*free_b = exw_free_bytes();
+	*total_b = (uint64_t)nclus << (spc_shift + 9);
+	return 0;
 }

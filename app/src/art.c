@@ -6,6 +6,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "games.h"
+#include "gfx.h"
 
 #define ART_FILE	"/dev_hdd0/tmp/prism_art.dat"
 #define ART_MAX		(32 * 1024 * 1024)
@@ -38,6 +39,9 @@ int art_load_from(const char *path)
 
 	/* v0.57: loaded again after the covers page rewrote it. Every game's cover pointer is into the old
 	 * buffer: the caller re-runs ui_prepare() (main.c rescan) before anything is drawn */
+#ifdef UI_RSX
+	gx_tex_forget();	/* v0.67: the covers the RSX keeps are of the old buffer */
+#endif
 	free(texs);
 	free(art);
 	texs = NULL;

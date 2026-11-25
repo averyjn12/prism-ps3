@@ -21,11 +21,22 @@ rm -rf "$B"; mkdir -p "$B/pkg/USRDIR" "$OUT"
 TP="$HERE/../third_party"
 [ -f "$TP/bearssl_ppu/libbearssl.a" ] && [ -f "$TP/bearssl_ppu/ta_mozilla.c" ] || { echo "BearSSL is not built: bash third_party/build_bearssl.sh"; exit 1; }
 # v0.60: -DLR_APP adds lr_fs.c's lr_fs_run (the open file's sector runs) to the app's copy only
-CFLAGS=(-O2 -Wall -mcpu=cell -mhard-float -fmodulo-sched -ffunction-sections -fdata-sections -DPRISM_LR=5 -DPS2GXEMU -DLR_APP
+# v0.67: -DUI_RSX = the RSX draws the screens (src/gfx.c, the gx_ half of src/ui.c); the CPU drawing stays in as the fallback
+CFLAGS=(-O2 -Wall -mcpu=cell -mhard-float -fmodulo-sched -ffunction-sections -fdata-sections -DPRISM_LR=5 -DPS2GXEMU -DLR_APP -DUI_RSX
  "-I$PSL1GHT/ppu/include" "-I$HERE/src" "-I$HERE/src/stub" "-I$TREE" "-I$TP/BearSSL/inc" "-I$TP/bearssl_ppu")
 for f in "$HERE"/src/*.c "$TREE/lr_fs.c"; do
     ppu-gcc "${CFLAGS[@]}" -c "$f" -o "$B/$(basename "${f%.c}").o"
 done
+# v0.67: the two RSX programs (src/shaders), compiled by cgcomp and linked in as data the way PSL1GHT's
+# ppu_rules / data_rules do (bin2s names the symbols prism_v_vpo and prism_f_fpo). cgcomp loads NVIDIA's
+# Cg library at run time: third_party/get_cg.sh puts libCg.so in ~/cg
+CGLIB="$HOME/cg/usr/lib64"
+[ -f "$CGLIB/libCg.so" ] || { echo "the Cg library is missing: bash third_party/get_cg.sh"; exit 1; }
+LD_LIBRARY_PATH="$CGLIB" cgcomp -v "$HERE/src/shaders/prism_v.vcg" "$B/prism_v.vpo" > /dev/null
+LD_LIBRARY_PATH="$CGLIB" cgcomp -f "$HERE/src/shaders/prism_f.fcg" "$B/prism_f.fpo" > /dev/null
+# the names and slots src/gfx.c looks up must be in the compiled programs, or the RSX path stays off everywhere
+python3 "$HERE/host/shader_check.py" "$B/prism_v.vpo" "$B/prism_f.fpo" | tail -1 | grep -q "shader check: ok" || { echo "the compiled RSX programs are not what gfx.c expects"; exit 1; }
+(cd "$B" && bin2s -a 64 prism_v.vpo | ppu-as -o prism_v_vpo.o && bin2s -a 64 prism_f.fpo | ppu-as -o prism_f_fpo.o)
 # v0.26: import stub for cellGameExec (sprx/gameexec), built the way PSL1GHT builds its own stubs
 GX="$HERE/sprx/gameexec"
 ppu-gcc -mhard-float -fmodulo-sched -ffunction-sections -fdata-sections -mregnames -mcpu=cell -D__ASSEMBLY__ \

@@ -11,15 +11,24 @@
 #include "vmc.h"
 #include "gfx.h"
 #include "ui.h"
+#include "savefiles.h"	/* v0.67: saves to and from USB drives and card slots */
 
 #define MC_COLS		4
 #define MC_ROWS		2
 
-enum { MM_BROWSE, MM_OPTIONS, MM_ASK };
+enum { MM_BROWSE, MM_OPTIONS, MM_ASK, MM_FILES };
 
 static int mc_card, mc_sel, mc_top, mc_mode, mc_pick, mc_npick;
 static int mc_targets[MC_CARDS], mc_ntarget;	/* the cards a save can be copied to */
-static int mc_act;				/* the action asked: -1 delete, else target card */
+/* the action asked: -1 delete; 0.. = copy to that card; v0.67: ACT_SEND - d = write it as a file to place d
+ * (savefiles.h sf_dev[d]); ACT_BRING = bring file mc_fsel (sf_file[]) into this card */
+#define ACT_SEND	(-100)
+#define ACT_BRING	(-200)
+#define IS_SEND(a)	((a) <= ACT_SEND && (a) > ACT_SEND - SF_DEVS)
+static int mc_act;
+static int mc_ndev;				/* the places a save can be sent to (0 on a PS1 card) */
+static int mc_fsel, mc_ftop;			/* the save file chosen in the list (MM_FILES) */
+#define MC_FROWS	7
 static char mc_note[120];
 static unsigned mc_note_until;
 
@@ -44,6 +53,11 @@ void mc_step(void)
 {
 }
 
+unsigned mc_nav_sig(void)	/* v0.72: screens.h */
+{
+	return (unsigned)(mc_card * 4096 + mc_sel * 64 + mc_mode * 16 + mc_pick) + (unsigned)mc_fsel * 65536u;
+}
+
 /* ---- icons ---- */
 
 static float mc_tx[MC_VERTS], mc_ty[MC_VERTS], mc_tz[MC_VERTS];
@@ -56,8 +70,21 @@ static float mc_key[MC_VERTS / 3];
 static void icon_draw(const save_t *ic, float px, float py, float size, float turn, int al)
 {
 	const float st = 0.2079f, ct = 0.9781f;
-	float s = fsin(turn), c = fcos(turn), k = ic->k * size * 0.5f;
+	float s = fsin(turn), c = fcos(turn), k = ic->k * size * 0.5f, zmax = 1.0f, dim = 1.0f;
 	int i, n = ic->nv / 3, gap;
+
+	/* v0.72 (Bananafuzzbuddy, 11-25: the turning icons "clip" and "I can see the other side of the object"). Two causes,
+	 * both ours, both since the RSX turns every icon live (v0.67):
+	 *  - an icon that is not the chosen one was drawn 9/10 solid (alpha 0x74) to set it back a little. Each
+	 *    TRIANGLE was 9/10 solid, so the far side showed through the near side. Up to v0.66 those icons were
+	 *    stills, drawn solid once and then faded as one picture. Now: solid, and darker by the same amount.
+	 *  - far-to-near sorting by a triangle's middle goes wrong where triangles cross or are long. The RSX has
+	 *    a depth buffer; the icon now uses it (ui_depth), so the nearer surface wins at every pixel. */
+	if (GFX_GPU && al < 0x80)
+	{
+		dim = (float)al / 128.0f;
+		al = 0x80;
+	}
 
 	for (i = 0; i < ic->nv; i++)
 	{
@@ -70,12 +97,16 @@ static void icon_draw(const save_t *ic, float px, float py, float size, float tu
 		mc_tx[i] = px + rx * k;
 		mc_ty[i] = py + (y * ct + rz * st) * k;
 		mc_tz[i] = rz * ct - y * st;
+		if (mc_tz[i] > zmax)
+			zmax = mc_tz[i];
+		if (-mc_tz[i] > zmax)
+			zmax = -mc_tz[i];
 		l = 0.74f - (nz * ct - ny * st) * (0.30f / 4096.0f) - (ny * ct + nz * st) * (0.14f / 4096.0f) - nx * (0.08f / 4096.0f);
 		if (l < 0.50f)
 			l = 0.50f;
 		if (l > 1.0f)
 			l = 1.0f;
-		mc_tl[i] = (u8)(l * 128.0f);
+		mc_tl[i] = (u8)(l * dim * 128.0f);
 	}
 	for (i = 0; i < n; i++)
 	{
@@ -95,6 +126,7 @@ static void icon_draw(const save_t *ic, float px, float py, float size, float tu
 			mc_ord[j] = t;
 		}
 	}
+	ui_depth(1);
 	for (i = 0; i < n; i++)
 	{
 		int a = 3 * mc_ord[i], b = a + 1, d = a + 2;
@@ -102,9 +134,12 @@ static void icon_draw(const save_t *ic, float px, float py, float size, float tu
 		float xy[6] = { mc_tx[a], mc_ty[a], mc_tx[b], mc_ty[b], mc_tx[d], mc_ty[d] };
 		float uv[6] = { (float)va[6], (float)va[7], (float)vb[6], (float)vb[7], (float)vd[6], (float)vd[7] };
 		col_t cc[3] = { RGBA(mc_tl[a], mc_tl[a], mc_tl[a], al), RGBA(mc_tl[b], mc_tl[b], mc_tl[b], al), RGBA(mc_tl[d], mc_tl[d], mc_tl[d], al) };
+		/* larger mc_tz = farther (the sort above draws the largest first): 0.05 .. 0.95 of the depth range */
+		float dp[3] = { 0.5f + 0.45f * mc_tz[a] / zmax, 0.5f + 0.45f * mc_tz[b] / zmax, 0.5f + 0.45f * mc_tz[d] / zmax };
 
-		tri_tex(&ic->tex, xy, uv, cc);
+		tri_tex_z(&ic->tex, xy, dp, uv, cc);
 	}
+	ui_depth(0);
 }
 
 /* v0.27: the saves that are not chosen show a still of their icon, drawn once (by icon_draw, onto a
@@ -267,8 +302,13 @@ void mc_draw(void)
 						RGBA(0x7F, 0xE3, 0xFF, 0x30), RGBA(0x7F, 0xE3, 0xFF, 0x30), RGBA(0x7F, 0xE3, 0xFF, 0x00), RGBA(0x7F, 0xE3, 0xFF, 0x00));
 				if (e->icon && cd->ps1)
 					ps1_icon_draw(e, cx, cy + bob, size, chosen ? 0x80 : 0x74);
-				else if (e->icon && !chosen)
+#ifdef MC_LIVE_ICONS	/* host/rsx_host.sh: the CPU drawing with live icons too, to compare like with like */
+				else if (0)
+#else
+				else if (e->icon && !chosen && !GFX_GPU)
+#endif
 				{
+					/* v0.67: only while the CPU draws; the RSX turns every icon live (the branch below) */
 					/* v0.27: a still, drawn once at the angle the icon had at frame 0 */
 					if (!e->still)
 						make_still(e, i * 0.13f);
@@ -306,7 +346,9 @@ void mc_draw(void)
 	legend_line();
 	x = LEFT;
 	if (s)
-		x = legend_icon(x, 0, "Copy or delete");
+		x = legend_icon(x, 0, "Options");
+	if (cd->ok && !cd->ps1)
+		x = legend_icon(x, 1, "Bring in");	/* v0.67: a save file from a USB drive or a card */
 	x = legend_item(x, -1, "L1 R1", "Card");
 	x = legend_item(x, -1, "SELECT", "Read again");
 	legend_icon(x, 3, "Menu");
@@ -315,6 +357,8 @@ void mc_draw(void)
 	{
 		int k, y0 = 138, h = 52 + 36 * mc_npick;
 
+		if (y0 + h > 436)
+			y0 = 436 - h;	/* v0.67: more rows with the places to send to */
 		sheet(156.0f, (float)y0, 484.0f, (float)(y0 + h));
 		fit(ln, sizeof ln, F_SMALL, s->title, 300);
 		text_centre(F_SMALL, 320, y0 + 14, 1, DIM, ln);
@@ -322,7 +366,9 @@ void mc_draw(void)
 		{
 			if (k < mc_ntarget)
 				snprintf(ln, sizeof ln, "Copy to %s", cards[mc_targets[k]].name);
-			else if (k == mc_ntarget)
+			else if (k < mc_ntarget + mc_ndev)
+				snprintf(ln, sizeof ln, "Send to %s", sf_dev[k - mc_ntarget].name);
+			else if (k == mc_ntarget + mc_ndev)
 				strcpy(ln, "Delete");
 			else
 				strcpy(ln, "Cancel");
@@ -330,18 +376,68 @@ void mc_draw(void)
 			sheet_item(y0 + 48 + 36 * k, mc_pick == k, t);
 		}
 	}
-	else if (mc_mode == MM_ASK && s)
+	else if (mc_mode == MM_FILES)
+	{
+		/* v0.67: the save files found (savefiles.h), to bring one into this card */
+		int k;
+
+		sheet(96.0f, 92.0f, 544.0f, 372.0f);
+		text_centre(F_BOLD, 320, 106, 0, INK, "Bring in a save");
+		snprintf(ln, sizeof ln, "Into the card %s", cd->name);
+		fit(t, sizeof t, F_SMALL, ln, 420);
+		text_centre(F_SMALL, 320, 136, 0, DIM, t);
+		for (k = 0; k < MC_FROWS && mc_ftop + k < n_sf_file; k++)
+		{
+			const sf_file_t *f = &sf_file[mc_ftop + k];
+			int y = 166 + 26 * k, chosen = mc_ftop + k == mc_fsel;
+
+			if (chosen)
+			{
+				rect(112.0f, (float)y - 4.0f, 528.0f, (float)y + 20.0f, RGBA(0x7F, 0xE3, 0xFF, 0x1C));
+				frame_rect(112.0f, (float)y - 4.0f, 528.0f, (float)y + 20.0f, 1.0f, GLOW);
+			}
+			fit(t, sizeof t, F_SMALL, f->save, 250);
+			text(F_SMALL, 122, y, chosen ? INK : DIM, t);
+			snprintf(ln, sizeof ln, "%s  " DOT "  %u KB", f->dev, f->kb);
+			text(F_SMALL, 518 - text_w(F_SMALL, ln, 0), y, chosen ? DIM : FAINT, ln);
+		}
+		snprintf(ln, sizeof ln, "%d OF %d", mc_fsel + 1, n_sf_file);
+		text_centre(F_SMALL, 320, 350, 1, FAINT, ln);
+	}
+	else if (mc_mode == MM_ASK && (s || mc_act == ACT_BRING))
 	{
 		sheet(150.0f, 138.0f, 490.0f, 304.0f);
-		text_centre(F_BOLD, 320, 154, 0, INK, mc_act >= 0 ? "Copy this save?" : "Delete this save?");
+		if (mc_act == ACT_BRING)
+		{
+			/* v0.67 */
+			const sf_file_t *f = &sf_file[mc_fsel];
+
+			text_centre(F_BOLD, 320, 154, 0, INK, "Bring this save in?");
+			fit(ln, sizeof ln, F_BODY, f->save, 310);
+			text_centre(F_BODY, 320, 188, 0, DIM, ln);
+			snprintf(ln, sizeof ln, "From %s, into %s.", f->dev, cd->name);
+			fit(t, sizeof t, F_SMALL, ln, 320);
+			text_centre(F_SMALL, 320, 216, 0, DIM, t);
+		}
+		else
+		{
+		text_centre(F_BOLD, 320, 154, 0, INK, mc_act >= 0 ? "Copy this save?" : IS_SEND(mc_act) ? "Send this save?" : "Delete this save?");
 		fit(ln, sizeof ln, F_BODY, s->title, 310);
 		text_centre(F_BODY, 320, 188, 0, DIM, ln);
 		if (mc_act >= 0)
 			snprintf(ln, sizeof ln, "It will be copied to %s.", cards[mc_act].name);
+		else if (IS_SEND(mc_act))
+		{
+			/* v0.67: a second, smaller line says what happens to a file already there */
+			snprintf(ln, sizeof ln, "To %s, in its folder " SF_DIR ".", sf_dev[ACT_SEND - mc_act].name);
+			text_centre(F_SMALL, 320, 226, 0, sf_exists(ACT_SEND - mc_act, s->dir) ? AMBER : FAINT,
+				sf_exists(ACT_SEND - mc_act, s->dir) ? "The file already there for this save is replaced." : "The save stays on the card.");
+		}
 		else
 			snprintf(ln, sizeof ln, "It will be gone from %s for good.", cd->name);
 		fit(t, sizeof t, F_SMALL, ln, 320);
-		text_centre(F_SMALL, 320, 216, 0, mc_act >= 0 ? DIM : AMBER, t);
+		text_centre(F_SMALL, 320, IS_SEND(mc_act) ? 208 : 216, 0, mc_act >= 0 || IS_SEND(mc_act) ? DIM : AMBER, t);
+		}
 		for (c = 0; c < 2; c++)
 		{
 			float bx = c ? 330.0f : 200.0f;
@@ -360,11 +456,42 @@ void mc_draw(void)
 
 static void do_action(void)
 {
-	char why[160], ln[200];
+	char why[160], ln[200], want[33];
 	card_t *cd = &cards[mc_card];
 	int r, keep = mc_sel;
 
-	if (mc_act >= 0)
+	want[0] = 0;
+	if (mc_act == ACT_BRING)
+	{
+		/* v0.67: a save file into this card (vmcw.c keeps the card as it was first, as for every change) */
+		const sf_file_t *f = &sf_file[mc_fsel];
+
+		progress(NULL, "ONE MOMENT", "Bringing the save in", 0.5f, f->dev);
+		r = vmc_import_psu(f->path, cd, why, sizeof why);
+		if (r == 0)
+		{
+			snprintf(ln, sizeof ln, "Brought in from %s.", f->dev);
+			snprintf(want, sizeof want, "%s", f->save);
+		}
+		else
+			snprintf(ln, sizeof ln, "Not brought in: %s.", why);
+	}
+	else if (IS_SEND(mc_act))
+	{
+		/* v0.67: the save as a file on a USB drive or a card; the card itself is not changed */
+		char shown[80];
+		int d = ACT_SEND - mc_act;
+
+		progress(NULL, "ONE MOMENT", "Writing the save file", 0.5f, sf_dev[d].name);
+		r = sf_export(cd, mc_sel, d, shown, sizeof shown, why, sizeof why);
+		if (r == 0)
+			snprintf(ln, sizeof ln, "Written to %s: %s", sf_dev[d].name, shown);
+		else
+			snprintf(ln, sizeof ln, "Not written: %s.", why);
+		mc_say(ln);
+		return;		/* nothing on the cards changed: no need to read them again */
+	}
+	else if (mc_act >= 0)
 	{
 		int to = mc_act;
 
@@ -391,6 +518,15 @@ static void do_action(void)
 		vmc_load_all();
 		mc_card = at < n_cards ? at : 0;
 		mc_sel = keep < cards[mc_card].n ? keep : (cards[mc_card].n ? cards[mc_card].n - 1 : 0);
+		if (want[0])
+		{
+			/* v0.67: the save just brought in is the one chosen */
+			int k;
+
+			for (k = 0; k < cards[mc_card].n; k++)
+				if (!strcmp(cards[mc_card].saves[k].dir, want))
+					mc_sel = k;
+		}
 		mc_top = mc_sel / MC_COLS > MC_ROWS - 1 ? mc_sel / MC_COLS - MC_ROWS + 1 : 0;
 	}
 	mc_say(ln);
@@ -413,7 +549,9 @@ int mc_pad(unsigned pressed)
 		{
 			if (mc_pick < mc_ntarget)
 				mc_act = mc_targets[mc_pick];
-			else if (mc_pick == mc_ntarget)
+			else if (mc_pick < mc_ntarget + mc_ndev)
+				mc_act = ACT_SEND - (mc_pick - mc_ntarget);
+			else if (mc_pick == mc_ntarget + mc_ndev)
 				mc_act = -1;
 			else
 			{
@@ -434,8 +572,29 @@ int mc_pad(unsigned pressed)
 		else if (pressed & PAD_CROSS)
 		{
 			mc_mode = MM_BROWSE;
-			if (mc_pick == 1 && n)
+			if (mc_pick == 1 && (n || mc_act == ACT_BRING))
 				do_action();
+		}
+		return 0;
+	}
+	if (mc_mode == MM_FILES)
+	{
+		/* v0.67 */
+		if ((pressed & PAD_UP) && mc_fsel > 0)
+			mc_fsel--;
+		if ((pressed & PAD_DOWN) && mc_fsel < n_sf_file - 1)
+			mc_fsel++;
+		if (mc_fsel < mc_ftop)
+			mc_ftop = mc_fsel;
+		if (mc_fsel >= mc_ftop + MC_FROWS)
+			mc_ftop = mc_fsel - MC_FROWS + 1;
+		if (pressed & (PAD_CIRCLE | PAD_TRIANGLE | PAD_SQUARE))
+			mc_mode = MM_BROWSE;
+		else if ((pressed & PAD_CROSS) && n_sf_file)
+		{
+			mc_act = ACT_BRING;
+			mc_mode = MM_ASK;
+			mc_pick = 0;		/* the question starts on "No" */
 		}
 		return 0;
 	}
@@ -452,6 +611,26 @@ int mc_pad(unsigned pressed)
 	if (pressed & PAD_SELECT)
 	{
 		mc_open();
+		return 0;
+	}
+	if (pressed & PAD_SQUARE)
+	{
+		/* v0.67: bring a save file in. Only PS2 saves travel as .psu files */
+		if (!cd->ok || cd->ps1)
+			mc_say("Save files (.psu) hold PS2 saves: choose a PS2 card with L1 or R1 first.");
+		else
+		{
+			progress(NULL, "ONE MOMENT", "Looking for save files", 0.5f, "The folder " SF_DIR " on USB drives and cards");
+			sf_scan_devs();
+			sf_scan_files();
+			if (!n_sf_file)
+				mc_say("No save files found. They go in a folder " SF_DIR " on a USB drive or a card, as .psu files.");
+			else
+			{
+				mc_fsel = mc_ftop = 0;
+				mc_mode = MM_FILES;
+			}
+		}
 		return 0;
 	}
 	if (!n)
@@ -476,7 +655,14 @@ int mc_pad(unsigned pressed)
 		for (i = 0; i < n_cards; i++)
 			if (i != mc_card && cards[i].ok && cards[i].ps1 == cd->ps1)
 				mc_targets[mc_ntarget++] = i;
-		mc_npick = mc_ntarget + 2;
+		/* v0.67: the places it can be sent to as a file (PS2 saves only) */
+		mc_ndev = 0;
+		if (!cd->ps1)
+		{
+			sf_scan_devs();
+			mc_ndev = n_sf_dev;
+		}
+		mc_npick = mc_ntarget + mc_ndev + 2;
 		mc_mode = MM_OPTIONS;
 		mc_pick = mc_npick - 1;	/* starts on "Cancel" */
 	}

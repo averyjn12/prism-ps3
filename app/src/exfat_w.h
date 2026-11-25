@@ -23,6 +23,12 @@ int  exw_write(const void *buf, uint32_t len);
 int  exw_finish(char *why, int wn);
 /* Give up (nothing on the volume refers to what exw_write put there). */
 void exw_abort(void);
-/* free space on the exFAT volume (after exw_begin), bytes */
+/* v0.73: delete the file <dir>/<name> (never a folder). Everything is checked before the first write.
+ * 0 = gone and its space free; -1 = nothing was changed (why says what stopped it); -2 = the file is
+ * gone but a later write failed (why says what a disk check has to tidy). */
+int  exw_delete(const exw_dev *dev, const char *dir, const char *name, char *why, int wn);
+/* v0.73: the exFAT volume's free and whole size, bytes. 0 = found; nothing is written */
+int  exw_space(const exw_dev *dev, uint64_t *free_b, uint64_t *total_b, char *why, int wn);
+/* free space on the exFAT volume (after exw_begin or exw_delete), bytes */
 uint64_t exw_free_bytes(void);
 #endif

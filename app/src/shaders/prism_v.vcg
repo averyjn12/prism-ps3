@@ -1,0 +1,13 @@
+/* Prism v0.67: the one vertex program. Positions arrive already in clip space (gfx.c gx_put). */
+void main(float4 position : POSITION,
+          float2 texcoord : TEXCOORD0,
+          float4 color : TEXCOORD1,
+
+          out float4 oPosition : POSITION,
+          out float2 oTexCoord : TEXCOORD0,
+          out float4 oColor : TEXCOORD1)
+{
+	oPosition = position;
+	oTexCoord = texcoord;
+	oColor = color;
+}

@@ -30,6 +30,8 @@
 #include "screens.h"
 #include "webman.h"
 #include "rip.h"
+#include "sfx.h"
+#include "launch.h"	/* v0.72: pps_is_link */
 #include "exfat_card.h"
 #include "lr.h"
 #include "manage.h"
@@ -87,6 +89,13 @@ static int src_dev = -1;
  * "<name>.0", "<name>.1" ...; Bananafuzzbuddy's idea, 11-23; MGS2 already plays that way from the card) */
 static int ps2_img;
 #define PS2_FAT_DIR	"PS2PRISM"
+/* v0.67: several games in one go (copy_games, at the end of this file). The device is chosen once, for
+ * all of them; then copy_game() runs for each game as it does for one, only without asking again. */
+static int batch_d = -1;	/* the device chosen for the batch; -1 = one game: ask */
+static int batch_k, batch_n;	/* game k of n (1-based); n 0 = no batch */
+static int pick_many;		/* the picker is choosing for several games */
+static u64 exf_need;		/* the batch's largest single file: what the exFAT part must take in one run */
+static int last_result;		/* of the last copy_game(): 1 copied, 2 it was already there, 0 not copied */
 static int rip_ps_image(int plat, unsigned type, char *msg, int msg_n);
 
 static u64 tb(void)
@@ -123,6 +132,8 @@ static unsigned pressed(void)
 	unsigned b = pad_fn ? pad_fn() : 0, p = b & ~pad_last;
 
 	pad_last = b;
+	if (p)	/* v0.72: the copy screens' own menus make the menu sounds too */
+		sfx((p & PAD_CIRCLE) ? SFX_BACK : (p & (PAD_UP | PAD_DOWN | PAD_LEFT | PAD_RIGHT)) ? SFX_MOVE : SFX_OK);
 	return p;
 }
 
@@ -182,6 +193,8 @@ static void show(const char *what)
 /* Straight lv2 calls, 1 MB at a time. v0.12/v0.13 used stdio, and PSL1GHT's newlib (BUFSIZ 1024)
  * cut every 1 MB fwrite into 1 KB writes: the SD slot pays ~8.6 ms per write call, so the copy
  * ran at 0.12 MB/s against webMAN's 3.6 MB/s into the same card (v0.13 log, 2026-11-22). */
+static int link_hit;	/* v0.72: the last copy_file was refused because its target is a PPSSPP stand-in */
+
 static int copy_file(const char *src, const char *dst, u64 size)
 {
 	s32 in, out;
@@ -191,6 +204,14 @@ static int copy_file(const char *src, const char *dst, u64 size)
 	nfile_at++;
 	logf_("> %d/%d %llu %s", nfile_at, nfiles, (unsigned long long)size, src);
 	a = tb();
+	if (pps_is_link(dst))
+	{
+		/* v0.72: this name on the hard disk stands for a game on a card, for PPSSPP (launch.h), and while the
+		 * console stays on it IS that game: opening it for writing would empty the game on the card */
+		logf_("  refused: %s is PPSSPP's stand-in for a card game", dst);
+		link_hit = 1;
+		return -6;
+	}
 	if (sysFsOpen(src, SYS_O_RDONLY, &in, NULL, 0) != 0)
 		return -1;
 	if (sysFsOpen(dst, SYS_O_WRONLY | SYS_O_CREAT | SYS_O_TRUNC, &out, NULL, 0) != 0)
@@ -343,7 +364,7 @@ static int usable(int i)
 	if (slot_dev(i) && ps3_dest())
 		return 0;
 	if (i == EXF)
-		return devs[i].present && exf_ok;
+		return devs[i].present && exf_ok && (!pick_many || devs[i].free >= total);	/* v0.67: room for the whole batch */
 	if (i == 0 && ps2_img)		/* in parts if need be */
 		return devs[i].present && i != src_dev && devs[i].free >= total + (64u << 20);
 	return devs[i].present && i != src_dev && devs[i].free >= total + (64u << 20) && !(devs[i].fat && bigfile);
@@ -370,7 +391,7 @@ static void draw_pick(int sel, int asking, int yes)
 		fit(ln, sizeof ln, F_SMALL, raw, RIGHT - LEFT);
 	}
 	text_centre(F_SMALL, 320, 84, 1, DIM, ln);
-	text_centre(F_BODY, 320, 100, 0, INK, "Copy it to which device?");
+	text_centre(F_BODY, 320, 100, 0, INK, pick_many ? "Copy them to which device?" : "Copy it to which device?");
 	for (i = 0; i < NDEV; i++)
 	{
 		int ok = usable(i);
@@ -385,7 +406,7 @@ static void draw_pick(int sel, int asking, int yes)
 		text(F_BODY, LEFT + 12, y, ok ? (i == sel ? INK : DIM) : FAINT, devs[i].name);
 		fmt_size(a, sizeof a, devs[i].free);
 		if (i == src_dev)
-			snprintf(ln, sizeof ln, "it is here");
+			snprintf(ln, sizeof ln, pick_many ? "they are here" : "it is here");
 		else if (slot_dev(i) && ps3_dest())
 			snprintf(ln, sizeof ln, "PS3 games do not start from the card slot");
 		else if (i == 0 && ps2_img && bigfile)
@@ -426,7 +447,11 @@ static void draw_pick(int sel, int asking, int yes)
 		{
 			char raw[300];
 
-			if (sel == 0 && ps2_img && bigfile)
+			if (pick_many && sel == EXF)
+				snprintf(raw, sizeof raw, "They go to the exFAT part's /%s, one after another", dest_sub);
+			else if (pick_many)
+				snprintf(raw, sizeof raw, "They go to %s/%s, one after another", devs[sel].path, sub_on(sel));
+			else if (sel == 0 && ps2_img && bigfile)
 				snprintf(raw, sizeof raw, "It goes to %s/%s/%s.0, .1 ...", devs[sel].path, sub_on(sel), dest_name);
 			else if (sel == EXF)
 				snprintf(raw, sizeof raw, "It goes to the exFAT part's /%s/%s", dest_sub, dest_name);
@@ -435,7 +460,7 @@ static void draw_pick(int sel, int asking, int yes)
 			fit(ln, sizeof ln, F_SMALL, raw, 380);
 		}
 		text_centre(F_SMALL, 320, 192, 0, DIM, ln);
-		text_centre(F_SMALL, 320, 212, 0, AMBER, "Anything already there with that name is replaced.");
+		text_centre(F_SMALL, 320, 212, 0, AMBER, pick_many ? "Anything already there with the same names is replaced." : "Anything already there with that name is replaced.");
 		for (i = 0; i < 2; i++)
 		{
 			float bx = i ? 330.0f : 200.0f;
@@ -484,7 +509,7 @@ static void scan_devs(void)
 			}
 			if (strcmp(dest_sub, "PS2ISO") || exc_open(&dv, exf_why, sizeof exf_why))
 				continue;
-			exf_ok = exw_begin(&dv, dest_sub, dest_name, total, exf_why, sizeof exf_why) == 0;
+			exf_ok = exw_begin(&dv, dest_sub, dest_name, exf_need ? exf_need : total, exf_why, sizeof exf_why) == 0;
 			devs[i].free = exw_free_bytes();
 			devs[i].present = exf_ok || strcmp(exf_why, "no exFAT volume on the card");
 			exw_abort();
@@ -1066,6 +1091,7 @@ static int copy_card_ps2(const game_t *g, char *msg, int msg_n)
 		if (sysFsStat(dst, &st) == 0)
 		{
 			snprintf(msg, msg_n, "%s is already on the hard disk", g->shown);
+			last_result = 2;
 			return 0;
 		}
 	}
@@ -1150,6 +1176,7 @@ static int copy_card_ps2(const game_t *g, char *msg, int msg_n)
 		double secs = (double)(tb() - t0) / TB_HZ;
 
 		snprintf(msg, msg_n, "%s copied to the hard disk: %.0f MB in %d:%02d", g->shown, total / 1e6, (int)secs / 60, (int)secs % 60);
+		last_result = 1;
 	}
 	return 0;
 }
@@ -1160,6 +1187,8 @@ int copy_game(unsigned (*pad)(void), int plat, const game_t *g, char *msg, int m
 	const char *base = strrchr(g->path, '/');
 	int r = 0, i, d, n = 0, tree = plat == P_PS3 && g->kind == 3;
 
+	last_result = 0;
+	stop = 0;
 	if (slot_bad_msg(slot_of_game(g), "Not copied", msg, msg_n))	/* v0.65: the copy would carry the slot's damage */
 		return -1;
 	if (plat == P_PS2 && g->where == 1 && g->kind < 4)
@@ -1170,7 +1199,10 @@ int copy_game(unsigned (*pad)(void), int plat, const game_t *g, char *msg, int m
 		nfiles = ndirs = nfile_at = bigfile = stop = 0;
 		first_bad[0] = 0;
 		t0 = tb();
-		snprintf(title, sizeof title, "%s", g->shown);
+		if (batch_n)
+			snprintf(title, sizeof title, "%d of %d: %s", batch_k, batch_n, g->shown);	/* v0.67 */
+		else
+			snprintf(title, sizeof title, "%s", g->shown);
 		pad_last = pad_fn ? pad_fn() : 0;	/* the X that chose this is not a Circle */
 		r = copy_card_ps2(g, msg, msg_n);
 		logf_("result: %s", msg);
@@ -1184,7 +1216,10 @@ int copy_game(unsigned (*pad)(void), int plat, const game_t *g, char *msg, int m
 	logf_("=== copy game, app v%s: %s", APP_VERSION, g->path);
 	pick_head = "COPY GAME";
 	src_dev = where_dev(g->where);
-	snprintf(title, sizeof title, "%s", g->shown);
+	if (batch_n)
+		snprintf(title, sizeof title, "%d of %d: %s", batch_k, batch_n, g->shown);	/* v0.67 */
+	else
+		snprintf(title, sizeof title, "%s", g->shown);
 	snprintf(tid, sizeof tid, "%s", g->id[0] ? g->id : "-");
 	base = base ? base + 1 : g->path;
 	if ((plat == P_PS2 && g->where != 2) || g->kind >= 4)
@@ -1234,10 +1269,34 @@ int copy_game(unsigned (*pad)(void), int plat, const game_t *g, char *msg, int m
 	}
 	snprintf(dest_name, sizeof dest_name, "%s", base);
 	logf_("  %d files, %llu bytes", nfiles, (unsigned long long)total);
+	link_hit = 0;
 	progress(NULL, "ONE MOMENT", title, 0.3f, "Looking at the storage devices");
 	ps2_img = plat == P_PS2;
 	scan_devs();
-	d = choose();
+	if (batch_d >= 0)
+	{
+		/* v0.67: the batch's device, chosen once; looked at again for THIS game: room, and whether it
+		 * is the device the game is on */
+		d = batch_d;
+		if (d == src_dev)
+		{
+			snprintf(msg, msg_n, "it is already on %s", devs[d].name);
+			last_result = 2;
+			goto out;
+		}
+		if (!usable(d))
+		{
+			if (d == EXF && exf_why[0])
+				snprintf(msg, msg_n, "%s", exf_why);
+			else if (devs[d].fat && bigfile && !(d == 0 && ps2_img))
+				snprintf(msg, msg_n, "a file is over 4 GB: %s cannot hold it", devs[d].name);
+			else
+				snprintf(msg, msg_n, "no room for it on %s", devs[d].name);
+			goto out;
+		}
+	}
+	else
+		d = choose();
 	if (d < 0)
 	{
 		snprintf(msg, msg_n, "Nothing copied");
@@ -1296,6 +1355,8 @@ int copy_game(unsigned (*pad)(void), int plat, const game_t *g, char *msg, int m
 		snprintf(msg, msg_n, "Stopped: nothing kept on the card");
 	else if (stop)
 		snprintf(msg, msg_n, "Stopped: the copy on %s is only part of the game", devs[d].name);
+	else if (r && link_hit)
+		snprintf(msg, msg_n, "PPSSPP opened this game from the card, and its name on the hard disk is held until the console restarts. Restart the console, then copy it");
 	else if (r)
 		snprintf(msg, msg_n, "The copy stopped at %s", first_bad);
 	else
@@ -1303,12 +1364,211 @@ int copy_game(unsigned (*pad)(void), int plat, const game_t *g, char *msg, int m
 		double secs = (double)(tb() - t0) / TB_HZ;
 
 		snprintf(msg, msg_n, "%s copied to %s: %.0f MB in %d:%02d", title, devs[d].name, total / 1e6, (int)secs / 60, (int)secs % 60);
+		last_result = 1;
 	}
 out:
 	logf_("result: %s", msg);
 	src_dev = -1;
 	ps2_img = 0;
 	return 0;
+}
+
+/* ---- v0.67: several games in one go (Bananafuzzbuddy, 2026-11-24: "select ten of them and have them transfer all
+ * over to the SD card at once, and vice versa") ----
+ * The games are the ones marked in a list (screens.c, R2). They are measured, the device is chosen ONCE
+ * (the same picker, the sum of their sizes against each device's room), one question is asked, and then
+ * copy_game() runs for each as it does for a single game: every rule it has (the bad-slot refusal, .part
+ * files, parts under 4 GB on FAT32, the exFAT writer's checks) holds for each game of the batch.
+ * PS2 games on a card go to the hard disk (the only place copy_card_ps2 writes); a batch that holds both
+ * card and hard-disk PS2 games is refused, since they would go opposite ways.
+ * Circle stops the game being copied AND the rest of the batch. */
+static int ask_hdd(int n, u64 sum, u64 freeb)
+{
+	char l1[120], l2[120], head[60];
+
+	snprintf(head, sizeof head, "Copy %d games to the hard disk?", n);
+	snprintf(l1, sizeof l1, "%.1f GB in all, %.1f GB free on the internal hard disk.", sum / 1073741824.0, freeb / 1073741824.0);
+	snprintf(l2, sizeof l2, "They stay on the card too. Circle: back.");
+	pad_last = pad_fn ? pad_fn() : 0;
+	for (;;)
+	{
+		unsigned p = pressed();
+
+		if (app_events() || (p & PAD_CIRCLE))
+			return 0;
+		if (p & PAD_CROSS)
+			return 1;
+		frame++;
+		backdrop();
+		draw_message(head, l1, l2, "X", "Copy them");
+		gfx_present();
+	}
+}
+
+int copy_games(unsigned (*pad)(void), int plat, const game_t *list, int n, char *msg, int msg_n)
+{
+	static const char *const pn[N_PLAT] = { "PS1", "PS2", "PS3", "PSP" };
+	char m[300], why1[220], where[40];
+	int k, d = -1, card = 0, other = 0, common = -2, anybig = 0, ok = 0, there = 0, bad = 0, stopped = 0;
+	u64 sum = 0, biggest = 0, t_all;
+
+	why1[0] = 0;
+	if (n <= 0)
+	{
+		snprintf(msg, msg_n, "No games are marked");
+		return -1;
+	}
+	pad_fn = pad;
+	for (k = 0; k < n; k++)
+	{
+		if (plat == P_PS2 && list[k].where == 1 && list[k].kind < 4)
+			card++;
+		else
+			other++;
+	}
+	logf_("=== copy %d marked %s games, app v%s (%d on a card read by Prism)", n, pn[plat], APP_VERSION, card);
+	if (card && other)
+	{
+		snprintf(msg, msg_n, "Nothing copied: some marked games are on a card and some on the hard disk. Mark one kind at a time.");
+		return -1;
+	}
+	if (card)
+	{
+		u64 freeb = 0;
+		u32 bs = 0;
+
+		for (k = 0; k < n; k++)
+			sum += list[k].size;
+		if (sysFsGetFreeSize("/dev_hdd0", &bs, &freeb) != 0)
+			freeb = 0;
+		freeb *= bs;
+		if (freeb < sum + (64ull << 20))
+		{
+			snprintf(msg, msg_n, "Nothing copied: not enough room on the hard disk, %.1f GB needed, %.1f GB free", sum / 1073741824.0, freeb / 1073741824.0);
+			return -1;
+		}
+		if (!ask_hdd(n, sum, freeb))
+		{
+			snprintf(msg, msg_n, "Nothing copied");
+			return -1;
+		}
+		snprintf(where, sizeof where, "the hard disk");
+	}
+	else
+	{
+		/* measure every game: the picker judges each device against all of them together */
+		for (k = 0; k < n; k++)
+		{
+			const game_t *g = &list[k];
+			int dev = where_dev(g->where), i, nf;
+
+			snprintf(m, sizeof m, "Measuring game %d of %d", k + 1, n);
+			progress(NULL, "ONE MOMENT", g->shown, 0.1f + 0.3f * k / n, m);
+			if (g->kind >= 4)
+				continue;	/* a disc: copy_game says so when its turn comes */
+			total = 0;
+			nfiles = ndirs = bigfile = 0;
+			first_bad[0] = 0;
+			if (plat == P_PS3 && g->kind == 3)
+				measure(g->path, 0);
+			else
+			{
+				nf = game_files(plat, g, flist, 64);
+				for (i = 0; i < nf; i++)
+				{
+					sysFSStat st;
+
+					if (sysFsStat(flist[i], &st) == 0)
+					{
+						total += st.st_size;
+						if (st.st_size > FAT32_MAX)
+							bigfile = 1;
+						if (st.st_size > biggest)
+							biggest = st.st_size;
+					}
+				}
+			}
+			sum += total;
+			anybig |= bigfile;
+			common = common == -2 ? dev : common == dev ? dev : -1;
+			if (app_events())
+			{
+				snprintf(msg, msg_n, "Nothing copied");
+				return -1;
+			}
+		}
+		{
+			const char *base = strrchr(list[0].path, '/');
+
+			snprintf(dest_name, sizeof dest_name, "%s", base ? base + 1 : list[0].path);
+		}
+		if (plat == P_PS3 && list[0].kind == 3)
+			snprintf(dest_sub, sizeof dest_sub, "GAMES");
+		else
+			snprintf(dest_sub, sizeof dest_sub, plat == P_PS1 ? "PSXISO" : plat == P_PSP ? "PSPISO" : plat == P_PS2 ? "PS2ISO" : "PS3ISO");
+		total = sum;
+		bigfile = anybig;
+		exf_need = biggest;
+		src_dev = common < 0 ? -1 : common;
+		ps2_img = plat == P_PS2;
+		snprintf(title, sizeof title, "%d %s games", n, pn[plat]);
+		snprintf(tid, sizeof tid, "-");
+		pick_head = "COPY GAMES";
+		pick_many = 1;
+		logf_("  %llu bytes in all, the largest file %llu", (unsigned long long)sum, (unsigned long long)biggest);
+		progress(NULL, "ONE MOMENT", title, 0.5f, "Looking at the storage devices");
+		scan_devs();
+		d = choose();
+		pick_many = 0;
+		exf_need = 0;
+		src_dev = -1;
+		ps2_img = 0;
+		if (d < 0)
+		{
+			snprintf(msg, msg_n, "Nothing copied");
+			return -1;
+		}
+		snprintf(where, sizeof where, "%s", devs[d].name);
+	}
+	batch_n = n;
+	batch_d = d;
+	t_all = tb();
+	for (k = 0; k < n && !stopped; k++)
+	{
+		batch_k = k + 1;
+		m[0] = 0;
+		copy_game(pad, plat, &list[k], m, sizeof m);
+		logf_("batch %d of %d: result %d: %s", k + 1, n, last_result, m);
+		if (last_result == 1)
+			ok++;
+		else if (last_result == 2)
+			there++;
+		else
+		{
+			bad++;
+			if (!why1[0])
+				snprintf(why1, sizeof why1, "%.60s: %.150s", list[k].shown, m);
+		}
+		if (stop || app_events())
+			stopped = 1;
+	}
+	batch_n = 0;
+	batch_d = -1;
+	{
+		double secs = (double)(tb() - t_all) / TB_HZ;
+		int left = n - ok - there - bad;
+
+		if (stopped)
+			snprintf(msg, msg_n, "Stopped: %d of %d copied to %s, %d not started", ok, n, where, left);
+		else if (!bad && !there)
+			snprintf(msg, msg_n, "All %d games copied to %s in %d:%02d", n, where, (int)secs / 60, (int)secs % 60);
+		else if (!bad)
+			snprintf(msg, msg_n, "%d copied to %s, %d were already there", ok, where, there);
+		else
+			snprintf(msg, msg_n, "%d of %d copied to %s. Not copied: %s", ok, n, where, why1);
+	}
+	logf_("batch result: %s", msg);
+	return bad || stopped ? -1 : 0;
 }
 
 /* ---- v0.30: a PSP game on the SD card runs from a copy on the hard disk ----

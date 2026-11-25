@@ -11,13 +11,14 @@
 #include "help.h"
 #include "covers.h"
 #include "launch.h"
+#include "sfx.h"	/* v0.73: menu_sounds_on */
 #include "version.h"
 
 /* v0.36: "Start Prism with the console" removed (Bananafuzzbuddy, 11-23: no better start-up method exists) */
 /* v0.46: Help first (the row the screen opens on) */
 /* v0.55: the card's PS2 games in webMAN's list, right under the setup it needs; v0.57: Game covers */
 /* v0.61: the PSP launcher games start with (launch.c psp_launcher_*) */
-enum { ACT_HELP, ACT_SETUP, ACT_WMSC, ACT_COVERS, ACT_PSPL, ACT_RECHECK, ACT_PROBE, ACT_WMFIX, N_ACT };
+enum { ACT_HELP, ACT_SETUP, ACT_WMSC, ACT_COVERS, ACT_PSPL, ACT_SOUND, ACT_RECHECK, ACT_PROBE, ACT_WMFIX, N_ACT };	/* v0.73: ACT_SOUND */
 
 static int st_covers;	/* v0.57: the Game covers page is up (covers.c) */
 
@@ -37,8 +38,29 @@ static unsigned st_ask_at;
 dev_space_t dev_space[DEV_SPACE_N];
 int n_dev_space;
 
+/* v0.70: which PSP launchers are installed and which one is the default: both mean opening or looking up
+ * files (launch.c), and v0.61-v0.69 asked once for EVERY ROW of EVERY FRAME. On the console the Settings
+ * screen took 12.5 ms of a frame against 1.5 ms for HOME (prism_perf.log, 2026-11-25, scr 4), nearly all
+ * of a 60 Hz frame. Now asked when the screen opens, after the row is used, and once a second. */
+static int pl_have, pl_now;
+static unsigned pl_at;
+
+static void pl_refresh(void)
+{
+	pl_have = psp_launchers_installed();
+	pl_now = psp_launcher_for(NULL);
+	pl_at = frame;
+}
+
+unsigned settings_nav_sig(void)	/* v0.72: screens.h */
+{
+	return (unsigned)(st_sel * 64 + st_ask * 8 + st_yes * 4 + st_help * 2 + st_covers) + help_nav_sig() * 1024u + (unsigned)pl_now * 65536u
+		+ (unsigned)menu_sounds_on() * 524288u;
+}
+
 void settings_open(void)
 {
+	pl_refresh();
 	st_sel = 0;
 	st_ask = 0;
 	st_help = 0;
@@ -171,20 +193,23 @@ void settings_draw(void)
 	text(F_BODY, LEFT, 204, c, ps2);
 	two_lines(F_SMALL, LEFT, 228, 290, DIM, det);
 
+	if (frame - pl_at > 60)
+		pl_refresh();
 	if (st_sel >= n_act())
 		st_sel = n_act() - 1;
 	for (i = 0; i < n_act(); i++)
 	{
-		const int pl = psp_launcher_for(NULL);
+		const int pl = pl_now;
 		const char *s = i == ACT_HELP ? "Help" : i == ACT_PROBE ? "Write a probe log" : i == ACT_RECHECK ? "Check the console again"
 			: i == ACT_WMFIX ? "Turn webMAN's Auto-Play off" : i == ACT_WMSC ? "Put PS2 games in webMAN's list"
 			: i == ACT_COVERS ? "Game covers"
-			: i == ACT_PSPL ? (pl == PSPL_REMASTER ? "PSP games start with: Remaster launcher" : pl ? "PSP games start with: Minis launcher"
-				: "PSP games: no PSP launcher installed")
+			: i == ACT_SOUND ? (menu_sounds_on() ? "Menu sounds: on" : "Menu sounds: off")
+			: i == ACT_PSPL ? (pl == PSPL_REMASTER ? "PSP games start with: Remaster launcher" : pl == PSPL_PPSSPP ? "PSP games start with: PPSSPP"
+				: pl ? "PSP games start with: Minis launcher" : "PSP games: no PSP launcher installed")
 			: (su.state == SU_APP ? "Remove the PS2 setup" : "Set up PS2 play");
 		int on = i == st_sel, usable = (i != ACT_SETUP || (su.state == SU_APP || (chk.ps2_ok && su.state != SU_CONFLICT && su.shipped)))
 			&& (i != ACT_WMSC || su.state == SU_APP || su.state == SU_BENCH)
-			&& (i != ACT_PSPL || psp_launchers_installed() == (PSPL_MINIS_ | PSPL_REMASTER));
+			&& (i != ACT_PSPL || (pl_have & (pl_have - 1)) != 0);	/* v0.69: two or more to choose from */
 		/* v0.62 (Bananafuzzbuddy 11-24: the bar no longer lined up): every row is a slot of the same height, sized from
 		 * the font's own height and the room between the PS2 lines and the note line; the bar IS the slot and
 		 * the text sits in its middle, so the two cannot drift apart however many rows there are. Seven rows
@@ -335,17 +360,42 @@ int settings_pad(unsigned pressed)
 			return DO_RECHECK;
 		if (st_sel == ACT_PSPL)
 		{
-			/* v0.61: flips the default between the two launchers; a game's own choice (Square) stays */
-			int have = psp_launchers_installed(), now = psp_launcher_for(NULL), next = now == PSPL_REMASTER ? PSPL_MINIS_ : PSPL_REMASTER;
+			/* v0.61: flips the default between the two launchers; a game's own choice (Square) stays.
+			 * v0.69: goes round every installed one: Minis, Remaster, PPSSPP */
+			static const int order[3] = { PSPL_MINIS_, PSPL_REMASTER, PSPL_PPSSPP };
+			int have = psp_launchers_installed(), now = psp_launcher_for(NULL), next = now, k, at = 0;
 
-			if (have != (PSPL_MINIS_ | PSPL_REMASTER))
+			for (k = 0; k < 3; k++)
+				if (order[k] == now)
+					at = k;
+			for (k = 1; k <= 3; k++)
+				if (have & order[(at + k) % 3])
+				{
+					next = order[(at + k) % 3];
+					break;
+				}
+			if (!(have & (have - 1)))
 				ui_say(!have ? "No PSP launcher is installed: webMAN's setup can install them."
-					: have == PSPL_MINIS_ ? "Only the Minis launcher (PSPM66820) is installed." : "Only the Remaster launcher (PSPC66820) is installed.");
+					: have == PSPL_MINIS_ ? "Only the Minis launcher (PSPM66820) is installed."
+					: have == PSPL_REMASTER ? "Only the Remaster launcher (PSPC66820) is installed." : "Only PPSSPP is installed.");
 			else if (psp_launcher_set(NULL, next) == 0)
 				ui_say(next == PSPL_REMASTER ? "PSP games start with the Remaster launcher (PSPC66820), unless a game has its own choice."
+					: next == PSPL_PPSSPP ? "PSP games open in PPSSPP (choose the game again in its list), unless a game has its own choice."
 					: "PSP games start with the Minis launcher (PSPM66820), unless a game has its own choice.");
 			else
 				ui_say("Could not save the setting.");
+			pl_refresh();
+			return DO_NOTHING;
+		}
+		if (st_sel == ACT_SOUND)
+		{
+			/* v0.73: the tick, the two notes up and the two notes down; the opening keeps its sound */
+			int on = !menu_sounds_on();
+
+			if (menu_sounds_set(on) == 0)
+				ui_say(on ? "Menu sounds are on." : "Menu sounds are off. The opening keeps its sound.");
+			else
+				ui_say("Could not save the setting: it holds until Prism closes.");
 			return DO_NOTHING;
 		}
 		if (st_sel == ACT_COVERS)

@@ -66,6 +66,11 @@ u8  *vmc_read_file(card_t *c, const save_t *s, const char *name, u32 *len);
 extern const char *vmc_bak_dir;
 int vmc_copy(card_t *from, int si, card_t *to, char *why, int why_n);
 int vmc_delete(card_t *c, int si, char *why, int why_n);
+/* v0.67: a PS2 save as a .psu file (what uLaunchELF, mymc and PCSX2's tools pass around): written from a
+ * card, or brought into one. The card is changed only by vmc_import_psu, under the same backup rule. */
+int vmc_export_psu(card_t *c, int si, const char *path, char *why, int why_n);
+int vmc_import_psu(const char *path, card_t *to, char *why, int why_n);
+int vmc_psu_name(const char *path, char *name, unsigned *files);	/* name[33]: the save's folder in the file; 0 = it is a .psu */
 /* the ECC the PS2 card keeps for each 128 bytes (checked against every written page of the
  * owner's three cards, 6327 of 6327) */
 void vmc_ecc128(const u8 *chunk, u8 out[3]);

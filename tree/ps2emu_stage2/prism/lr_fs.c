@@ -1053,6 +1053,18 @@ int lr_fs_run(u32 i, u32 *lba, u32 *n)
 	*n = exts[i].n;
 	return (int)n_ext;
 }
+
+/* the Prism app only (v0.73: deleting a game from a card, src/manage.c): the volume catalogue entry i is
+ * on. *exfat: 1 exFAT, 0 FAT; *part: the volume's first sector on the card. 0, or -1 = no such entry.
+ * Not compiled into any stage2. */
+int lr_fs_cat_where(u32 i, int *exfat, u32 *part)
+{
+	if (i >= n_cat)
+		return -1;
+	*exfat = vols[cat[i].nd.vol].type == FS_EXFAT;
+	*part = vols[cat[i].nd.vol].part;
+	return 0;
+}
 #endif
 
 int lr_file_read(u64 off, u8 *dst, u32 len)

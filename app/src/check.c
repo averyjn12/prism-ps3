@@ -317,6 +317,11 @@ void check_console(void)
 
 /* SETTINGS' storage list (screens.h) */
 #include "screens.h"
+#include "games.h"		/* card_dev */
+#include "cardcheck.h"
+#include "cardcheck_core.h"	/* CC_OK */
+#include "exfat_w.h"
+#include "exfat_card.h"
 
 void dev_space_scan(void)
 {
@@ -339,5 +344,36 @@ void dev_space_scan(void)
 		dev_space[n_dev_space].name = d[i].name;
 		dev_space[n_dev_space].free = (unsigned long long)bs * fb;
 		n_dev_space++;
+	}
+	/* v0.73 (Bananafuzzbuddy, 11-25: "the storage doesn't list the MS"): the PS3 mounts only FAT32, so a card's exFAT
+	 * part was missing here although Prism reads games from it. Asked of Prism's own exFAT code, on every
+	 * slot whose card passed the damage check. Read only. */
+	{
+		static char nm[3][32];
+		u64 dev_was = card_dev;
+		int s;
+
+		for (s = 0; s < 3 && n_dev_space < DEV_SPACE_N; s++)
+		{
+			exw_dev dv;
+			uint64_t fr = 0, tot = 0;
+			char why[120];
+
+			if (slot_cc[s] != CC_OK)
+				continue;
+			card_dev = slot_storage(s);
+			if (exc_open(&dv, why, sizeof why) == 0)
+			{
+				if (exw_space(&dv, &fr, &tot, why, sizeof why) == 0)
+				{
+					snprintf(nm[s], sizeof nm[s], "%s (exFAT)", slot_name(s));
+					dev_space[n_dev_space].name = nm[s];
+					dev_space[n_dev_space].free = fr;
+					n_dev_space++;
+				}
+				exc_close();
+			}
+		}
+		card_dev = dev_was;
 	}
 }

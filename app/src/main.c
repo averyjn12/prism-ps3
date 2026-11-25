@@ -26,6 +26,9 @@
 #include "covers.h"
 #include "pspsd.h"
 #include "cardcheck.h"	/* v0.65 */
+#include "played.h"	/* v0.67 */
+#include "sfx.h"	/* v0.72 */
+#include "pad.h"	/* v0.72 */
 
 #define TB_HZ		79800000ULL
 
@@ -85,8 +88,8 @@ static u64 tb(void)
 
 static void perf(u64 draw, u64 present)
 {
-	static u64 t_start, d_sum, d_max, p_sum, b_sum, c_sum;
-	static unsigned n, lines;
+	static u64 t_start, d_sum, d_max, p_sum, b_sum, c_sum, f_max;
+	static unsigned n, lines, up_sum, drop_sum;
 	static int last_screen = -1;
 	u64 now = tb();
 
@@ -98,6 +101,10 @@ static void perf(u64 draw, u64 present)
 	p_sum += present;
 	if (draw > d_max)
 		d_max = draw;
+	if (draw + present > f_max)
+		f_max = draw + present;
+	up_sum += gx_stat_uploads;
+	drop_sum += gx_stat_dropped;
 	n++;
 	if ((now - t_start >= 5 * TB_HZ || screen != last_screen) && n > 1 && lines < 400)
 	{
@@ -110,36 +117,27 @@ static void perf(u64 draw, u64 present)
 			fprintf(f, "v%s scr %d plat %d: %u frames %.1f fps, draw avg %.1f ms max %.1f ms (backdrop %.1f, of it bg copy %.1f), present avg %.1f ms\n",
 				APP_VERSION, last_screen, plat, n, n / secs, d_sum * 1000.0 / TB_HZ / n, d_max * 1000.0 / TB_HZ,
 				b_sum * 1000.0 / TB_HZ / n, c_sum * 1000.0 / TB_HZ / n, p_sum * 1000.0 / TB_HZ / n);
+			/* v0.67: who drew (gfx.h). With the RSX drawing, "draw" is the PPU building the frame and
+			 * "present" is mostly the wait for the vsync; the slowest whole frame says whether one was missed */
+			if (gfx_gpu)
+				fprintf(f, "   RSX draws: slowest frame %.1f ms, last frame %u vertices in %u draws, %u textures sent, %u vertices dropped\n",
+					f_max * 1000.0 / TB_HZ, gx_stat_verts, gx_stat_draws, up_sum, drop_sum);
+			else
+				fprintf(f, "   CPU draws (reason %d: 1 = asked for with L1 + R1 or soft_draw.txt, negative = RSX set-up step)\n", gfx_gpu_why);
 			fclose(f);
 			lines++;
 		}
 		t_start = now;
-		d_sum = d_max = p_sum = b_sum = c_sum = 0;
-		n = 0;
+		d_sum = d_max = p_sum = b_sum = c_sum = f_max = 0;
+		n = up_sum = drop_sum = 0;
 	}
 	last_screen = screen;
 }
 
-/* every connected pad, as PAD_* bits */
+/* every connected pad, as PAD_* bits. v0.72: pad.c, where a pad with nothing new keeps what it held */
 static unsigned buttons(void)
 {
-	padInfo info;
-	padData d;
-	unsigned b = 0;
-	int i;
-
-	if (ioPadGetInfo(&info) != 0)
-		return 0;
-	for (i = 0; i < MAX_PADS; i++)
-	{
-		if (!info.status[i] || ioPadGetData(i, &d) != 0 || d.len <= 0)
-			continue;
-		b |= (d.BTN_UP ? PAD_UP : 0) | (d.BTN_DOWN ? PAD_DOWN : 0) | (d.BTN_LEFT ? PAD_LEFT : 0) | (d.BTN_RIGHT ? PAD_RIGHT : 0)
-			| (d.BTN_CROSS ? PAD_CROSS : 0) | (d.BTN_CIRCLE ? PAD_CIRCLE : 0) | (d.BTN_SQUARE ? PAD_SQUARE : 0)
-			| (d.BTN_TRIANGLE ? PAD_TRIANGLE : 0) | (d.BTN_L1 ? PAD_L1 : 0) | (d.BTN_R1 ? PAD_R1 : 0)
-			| (d.BTN_L2 ? PAD_L2 : 0) | (d.BTN_R2 ? PAD_R2 : 0) | (d.BTN_SELECT ? PAD_SELECT : 0) | (d.BTN_START ? PAD_START : 0);
-	}
-	return b;
+	return pad_buttons();
 }
 
 static void rescan(const char *what)
@@ -207,7 +205,7 @@ static int start(const game_t *g)
 		ui_say(msg);
 		return 0;
 	}
-	if (plat == P_PSP && WHERE_SLOT(g->where))
+	if (plat == P_PSP && WHERE_SLOT(g->where) && psp_launcher_for(g) != PSPL_PPSSPP)	/* v0.69: PPSSPP reads no card; launch_prepare says so */
 	{
 		/* v0.30: the PSP launcher does not run a game from the card slot (Bananafuzzbuddy, 11-23): play it
 		 * from a copy on the hard disk (rip.c psp_card_copy; kept for the next start).
@@ -243,15 +241,27 @@ static int start(const game_t *g)
 	}
 	progress(g, "STARTING", g->shown, 0.3f, g->kind == 4 ? "The disc in the drive" : "Mounting the game");
 	r = launch_prepare(plat, g, &spawn, why, sizeof(why));
+	if (r == 0)
+		played_mark(plat, g->name, ui_now_s);	/* v0.67: for Continue and "played N times" (played.h) */
 	if (r == 0 && spawn.ps2)
 	{
 		progress(g, "STARTING", g->shown, 0.8f, "Handing over to the PS2 side");
+		sound_close();	/* v0.72: the console is about to leave for the PS2 side */
 		r = launch_ps2_now();
 		if (r == 0)
 			for (;;)
 				usleep(100000);	/* lv2 is going down into the PS2 LPAR */
+		played_undo();	/* it did not start */
+		sound_open();
 		launch_disarm();
 		snprintf(why, sizeof(why), "the PS2 hand-over was refused (lv2 0x%08x)", (u32)r);
+	}
+	else if (r == 0 && spawn.ppsspp)
+	{
+		/* v0.69: held long enough to read: the game is picked again in PPSSPP's own list */
+		progress(g, "OPENING PPSSPP", g->shown, 1.0f, "PPSSPP shows its own list next: choose this game there");
+		usleep(3000000);
+		return 1;
 	}
 	else if (r == 0 && spawn.self[0])
 	{
@@ -280,8 +290,8 @@ int main(int argc, const char *argv[])
 {
 	unsigned held, last = 0, pressed;
 	const unsigned moves = PAD_UP | PAD_DOWN | PAD_LEFT | PAD_RIGHT;
-	int rep = 0, act;
-	u64 t0;
+	int rep = 0, act, snd_open;
+	u64 t0, rep_next = 0, wall0 = 0, wall0_tb = 0;
 
 	(void)argc;
 	(void)argv;
@@ -290,6 +300,39 @@ int main(int argc, const char *argv[])
 	t_main_s = wall_s();	/* v0.32: start-up timing (setup.c autostart_started) */
 	ui_clock = tb;
 	ioPadInit(7);
+	snd_open = sound_open();	/* v0.72: for the opening and the menu sounds, until Prism ends */
+	{
+		/* v0.67: the RSX draws the screens (gfx.h). The way back to the CPU drawing of v0.66, should a
+		 * console show nothing or rubbish: hold L1 + R1 while Prism starts (looked at for 0.3 s), or
+		 * leave a file USRDIR/soft_draw.txt. Either way the perf log says which path drew. */
+		FILE *f = fopen("/dev_hdd0/game/PRSM00001/USRDIR/soft_draw.txt", "rb");
+		int k;
+
+		if (f)
+		{
+			fclose(f);
+			gfx_soft_wanted = 1;
+		}
+		/* v0.69: this version's RSX drawing stopped answering on this console before (gfx.c): the CPU
+		 * draws. Another version tries the RSX again. */
+		f = fopen(GFX_RSX_FAILED, "rb");
+		if (f)
+		{
+			char v[64] = "";
+
+			if (fgets(v, sizeof v, f) && !strncmp(v, APP_VERSION, strlen(APP_VERSION)))
+				gfx_soft_wanted = 1;
+			fclose(f);
+		}
+		for (k = 0; k < 15 && !gfx_soft_wanted; k++)
+		{
+			unsigned b = buttons();
+
+			if ((b & PAD_L1) && (b & PAD_R1))
+				gfx_soft_wanted = 1;
+			usleep(20000);
+		}
+	}
 	if (gfx_init() != 0)
 		return 1;
 	launch_disarm();
@@ -320,14 +363,14 @@ int main(int argc, const char *argv[])
 			tr = (float)(now_tb - s) / (float)TB_HZ;
 			t = tr - INTRO_LEAD;
 			sysUtilCheckCallback();
-			if (!snd_on && snd_prep >= 0 && t >= -0.08f)
+			if (!snd_on && snd_prep >= 0 && t >= -0.02f)	/* v0.72: the port is 20 ms behind now, not 85 */
 			{
 				snd_play = intro_sound_play();
 				snd_on = 1;
 				t_intro_s = wall_s();	/* v0.32: for the start-up timing line */
 			}
 			now = buttons();
-			if (t >= INTRO_LEN)
+			if (t >= INTRO_LEN || gfx_dead)
 				break;
 			if ((now & ~before) && tr > 0.5f)
 			{
@@ -348,8 +391,8 @@ int main(int argc, const char *argv[])
 				fprintf(f, "v%s intro: %u frames in %.2f s (%.1f fps; lead-in %.1f s, intro %.1f s), slowest frame %.0f ms, ended by %s at intro t = %.2f s\n",
 					APP_VERSION, frames, tr, tr > 0.0f ? frames / tr : 0.0f, (double)INTRO_LEAD, (double)INTRO_LEN,
 					worst * 1000.0 / TB_HZ, by_button ? "a button" : "time", t);
-				fprintf(f, "sound: %s (%d) in %.0f ms, port %d\n", snd_prep == 1 ? "loaded" : snd_prep == 0 ? "computed" : "none",
-					snd_prep, synth_ms, snd_play);
+				fprintf(f, "sound: %s (%d) in %.0f ms, port %d, started %d\n", snd_prep == 1 ? "loaded" : snd_prep == 0 ? "computed" : "none",
+					snd_prep, synth_ms, snd_open, snd_play);
 				fclose(f);
 			}
 		}
@@ -394,6 +437,11 @@ int main(int argc, const char *argv[])
 	tinytees_install();
 	art_load();
 	tinytees_cover();	/* v0.59: loads the art file again itself if it added the cover */
+	pps_links_clean();	/* v0.72: PPSSPP's empty stand-in files, once the console has restarted (launch.h) */
+	played_load();		/* v0.67: before the first ui_prepare(), which looks for the game to continue */
+	wall0 = wall_s();
+	wall0_tb = tb();
+	ui_now_s = wall0;
 	rescan("Looking for games");
 	disc_acted = disc_prev = disc_signature();
 	disc_next = tb() + TB_HZ * 3 / 2;
@@ -418,20 +466,45 @@ int main(int argc, const char *argv[])
 			}
 			disc_prev = sig;
 		}
+		if (gfx_dead)
+			break;	/* v0.68: the RSX stopped answering: close, do not hang (gfx.c, prism_gfx.log) */
 		frame = (unsigned)((tb() - t0) * 60 / TB_HZ);
+		ui_now_s = wall0 + (tb() - wall0_tb) / TB_HZ;	/* v0.67: wall_s() itself writes a file: once, at the start */
 		sysUtilCheckCallback();
 		held = buttons();
 		pressed = held & ~last;
 		if (held & moves)
 		{
-			if (++rep > 12 && (rep & 1) == 0)
+			/* v0.67: by the clock. It was counted in frames (13 frames, then every other one), which at
+			 * the 20 frames a second of v0.66 was 0.65 s and then 10 a second; at 60 it would be 0.2 s
+			 * and 30 a second, too quick to stop on a game. Now 0.4 s, then 11 a second, at any rate. */
+			u64 now = tb();
+
+			if (!rep)
+			{
+				rep = 1;
+				rep_next = now + TB_HZ * 4 / 10;
+			}
+			else if (now >= rep_next)
+			{
 				pressed |= held & moves;
+				rep_next = now + TB_HZ * 9 / 100;
+			}
 		}
 		else
 			rep = 0;
 		last = held;
 
-		act = ui_pad(pressed, held);
+		{
+			/* v0.72: a sound whenever a press moved or changed something on the screen (sfx.h): a tick for
+			 * a move, two notes up for a choice, two down for going back */
+			unsigned before = ui_nav_sig();
+
+			act = ui_pad(pressed, held);
+			if (pressed && (act != DO_NOTHING || ui_nav_sig() != before))
+				sfx((pressed & PAD_CIRCLE) ? SFX_BACK : (pressed & (moves | PAD_L1 | PAD_R1)) ? SFX_MOVE : SFX_OK);
+			intro_sound_tidy();
+		}
 		if (act == DO_QUIT)
 			break;
 		if (act == DO_RESCAN)
@@ -519,7 +592,7 @@ int main(int argc, const char *argv[])
 			ui_say(m);
 			last = buttons();
 		}
-		else if (act == DO_PSPL_REM || act == DO_PSPL_MIN)
+		else if (act == DO_PSPL_REM || act == DO_PSPL_MIN || act == DO_PSPL_PPS)
 		{
 			/* v0.61: this game's own PSP launcher; the same as the default = no line of its own */
 			const game_t *g = (const game_t *)ui_chosen();
@@ -527,12 +600,14 @@ int main(int argc, const char *argv[])
 
 			if (g)
 			{
-				int want = act == DO_PSPL_REM ? PSPL_REMASTER : PSPL_MINIS_, def = psp_launcher_for(NULL);
+				int want = act == DO_PSPL_REM ? PSPL_REMASTER : act == DO_PSPL_PPS ? PSPL_PPSSPP : PSPL_MINIS_, def = psp_launcher_for(NULL);
 
-				if (psp_launcher_set(psp_game_key(g), want == def ? 0 : want) == 0)
-					snprintf(m, sizeof m, "%s will start with the %s launcher.", g->shown, want == PSPL_REMASTER ? "Remaster" : "Minis");
-				else
+				if (psp_launcher_set(psp_game_key(g), want == def ? 0 : want) != 0)
 					snprintf(m, sizeof m, "Could not save the choice.");
+				else if (want == PSPL_PPSSPP)	/* v0.69 */
+					snprintf(m, sizeof m, "%s will open in PPSSPP: choose it again in PPSSPP's own list.", g->shown);
+				else
+					snprintf(m, sizeof m, "%s will start with the %s launcher.", g->shown, want == PSPL_REMASTER ? "Remaster" : "Minis");
 				ui_say(m);
 			}
 			last = buttons();
@@ -601,6 +676,18 @@ int main(int argc, const char *argv[])
 			}
 			last = buttons();
 		}
+		else if (act == DO_COPYMARKED)
+		{
+			/* v0.67: the games marked with R2, to one device, one after another (rip.c copy_games) */
+			static game_t batch[MAX_GAMES];
+			char m[320];
+			int n = ui_marked(batch, MAX_GAMES);
+
+			copy_games(buttons, plat, batch, n, m, sizeof m);
+			rescan("Looking for games again");
+			ui_say(m);
+			last = buttons();
+		}
 		else if (act == DO_PROBE)
 		{
 			char m[80];
@@ -630,6 +717,7 @@ int main(int argc, const char *argv[])
 		}
 	}
 
+	sound_close();
 	gfx_end();
 	ioPadEnd();
 	wm_end();

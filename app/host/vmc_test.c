@@ -98,6 +98,47 @@ int main(int argc, char **argv)
 			return 1;
 		}
 	}
+	else if (!strcmp(argv[2], "export") && argc >= 6)
+	{
+		/* v0.67: vmc_test <bak> export <card> <save folder> <.psu file> */
+		expect_fail = argc > 6;
+		if (vmc_load(&a, argv[3]))
+			return 1;
+		si = find(&a, argv[4]);
+		if (si < 0)
+		{
+			printf("no save %s on %s\n", argv[4], a.name);
+			return 1;
+		}
+		r = vmc_export_psu(&a, si, argv[5], why, sizeof why);
+		printf("export %s %s: %s%s\n", a.name, argv[4], r ? "REFUSED: " : "done", r ? why : "");
+	}
+	else if (!strcmp(argv[2], "import") && argc >= 5)
+	{
+		/* v0.67: vmc_test <bak> import <.psu file> <card> [expect-fail] */
+		char nm[33];
+		unsigned nfiles = 0;
+
+		expect_fail = argc > 5;
+		if (vmc_load(&b, argv[4]))
+			return 1;
+		printf("psu name: %s\n", vmc_psu_name(argv[3], nm, &nfiles) == 0 ? nm : "(not a .psu)");
+		r = vmc_import_psu(argv[3], &b, why, sizeof why);
+		printf("import %s -> %s: %s%s\n", argv[3], b.name, r ? "REFUSED: " : "done", r ? why : "");
+		vmc_free(&b);
+		vmc_load(&b, argv[4]);
+		list(&b);
+		if (!r && (vmc_psu_name(argv[3], nm, &nfiles) != 0 || find(&b, nm) < 0))
+		{
+			printf("FAIL: the save is not on the card when read back\n");
+			return 1;
+		}
+		if (!r && b.saves[find(&b, nm)].nfiles != (int)nfiles)
+		{
+			printf("FAIL: %d files on the card, %u in the file\n", b.saves[find(&b, nm)].nfiles, nfiles);
+			return 1;
+		}
+	}
 	else
 		return 2;
 	if (expect_fail ? r == 0 : r != 0)

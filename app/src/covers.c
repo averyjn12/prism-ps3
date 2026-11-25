@@ -52,7 +52,7 @@ typedef struct
 } cg_t;
 
 static cg_t cg[4 * MAX_GAMES];
-static int n_cg, n_small;
+static int n_cg, n_small, n_noid;	/* v0.72 n_noid: PS1 / PS2 games whose serial could not be read */
 static cv_src src[CV_SRC_MAX];
 static int n_src;
 static u8 shown[CV_SRC_MAX];		/* a web source, or a local one whose folder is here */
@@ -182,6 +182,7 @@ void covers_open(void)
 		shown[i] = (u8)offered(&src[i]);
 	n_cg = 0;
 	n_small = 0;
+	n_noid = 0;
 	for (p = 0; p < 4; p++)
 	{
 		/* v0.58: PS3 and PSP games too */
@@ -193,7 +194,13 @@ void covers_open(void)
 			const game_t *g = &games[plat][i];
 
 			if (!cv_is_id(g->id))
+			{
+				/* v0.72: said on the page and in the log. Up to v0.71 such a game was passed over in silence,
+				 * and the page's "1 without a cover" was not the game the player was looking at. */
+				if ((plat == P_PS1 || plat == P_PS2) && g->kind < 4)
+					n_noid++;
 				continue;
+			}
 			if (plat == P_PS2 && g->kind < 4 && g->size && g->size < PS2_RETAIL_MIN)
 			{
 				n_small++;
@@ -212,7 +219,10 @@ void covers_open(void)
 			snprintf(cg[n_cg].path, sizeof cg[n_cg].path, "%s", g->path);
 			cg[n_cg].plat = (u8)cp[p];
 			cg[n_cg].gplat = plat;
-			cg[n_cg].have = g->cover != NULL || art_refused(g->id);
+			/* v0.72 (Bananafuzzbuddy, 11-25: a removed cover "won't look it up again??? that's nonsense"): a game whose
+			 * cover was removed is a game without a cover, and is looked up like any other. Up to v0.71 it
+			 * counted as having one until "Let Game covers find its cover" was chosen on the game. */
+			cg[n_cg].have = g->cover != NULL;
 			n_cg++;
 		}
 	}
@@ -309,7 +319,13 @@ void covers_draw(void)
 		y += 17;
 	}
 	text(F_SMALL, LEFT, y, DIM, "Prism ships no covers. A wrong one: Square on the game, \"Remove its cover\".");
-	if (n_small)
+	if (n_noid)
+	{
+		snprintf(ln, sizeof ln, "%d PS1 / PS2 game%s whose serial Prism could not read: no cover can be looked up (prism_covers.log).",
+			n_noid, n_noid > 1 ? "s" : "");
+		text(F_SMALL, LEFT, y + 17, AMBER, ln);
+	}
+	else if (n_small)
 	{
 		snprintf(ln, sizeof ln, "%d PS2 image%s under 16 MB not looked up: homebrew can borrow a real game's serial.", n_small, n_small > 1 ? "s" : "");
 		text(F_SMALL, LEFT, y + 17, FAINT, ln);
@@ -396,7 +412,19 @@ void covers_find(unsigned (*pad)(void), char *msg, int n)
 	pad_last = pad ? pad() : 0;
 	msg[0] = 0;
 	logf = fopen(LOG_FILE, "a");
-	say("=== look for covers, app v%s: %d games with a serial; %d PS2 image(s) under 16 MB left out", APP_VERSION, n_cg, n_small);
+	say("=== look for covers, app v%s: %d games with a serial; %d PS2 image(s) under 16 MB left out; %d with no serial read", APP_VERSION, n_cg, n_small, n_noid);
+	{
+		/* v0.72: which games, so a missing cover can be traced from the log alone */
+		int p2;
+
+		for (i = 0; i < n_cg; i++)
+			if (!cg[i].have)
+				say("  no cover: %s %s (%s)", cg[i].id, cg[i].title, cg[i].path);
+		for (p2 = P_PS1; p2 <= P_PS2; p2++)
+			for (i = 0; i < n_games[p2]; i++)
+				if (!cv_is_id(games[p2][i].id) && games[p2][i].kind < 4)
+					say("  no serial read ('%s'): %s", games[p2][i].id, games[p2][i].path);
+	}
 	for (i = 0; i < n_cg; i++)
 	{
 		missing += !cg[i].have;
@@ -634,7 +662,7 @@ static int rebuild(u8 **newpx, const char *mark_id, int mark_plat, int mark, con
 				e[k].title[0] = 0;	/* the borrowed serial's title goes too: the file name shows again */
 			}
 		}
-		say("rebuild: %s %s", mark_id, mark ? "cover removed, never looked up again" : "may be looked up again");
+		say("rebuild: %s %s", mark_id, mark ? "cover removed" : "may be looked up again");
 	}
 	if (add)
 	{
@@ -822,7 +850,7 @@ int covers_mark(const void *gv, int plat_index, int refuse, char *msg, int n)
 	if (r < 0)
 		snprintf(msg, n, "Nothing changed: %s.", why);
 	else if (refuse)
-		snprintf(msg, n, "Cover removed. Game covers will not look this game up again.");
+		snprintf(msg, n, "Cover removed. SETTINGS, Game covers can find one for it again.");
 	else
 		snprintf(msg, n, "Game covers will look this game up again (SETTINGS, Game covers).");
 	say("result: %s", msg);

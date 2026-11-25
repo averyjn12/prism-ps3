@@ -35,9 +35,14 @@ enum { DO_NOTHING, DO_START, DO_RESCAN, DO_QUIT, DO_PROBE, DO_RIP,
 	/* v0.58: a game's Square menu */
 	DO_COV_DEL, DO_COV_ALLOW,
 	/* v0.61: a PSP game's own launcher */
-	DO_PSPL_REM, DO_PSPL_MIN };
+	DO_PSPL_REM, DO_PSPL_MIN,
+	/* v0.67: copy the marked games (rip.c copy_games) */
+	DO_COPYMARKED,
+	/* v0.69: a PSP game opens in PPSSPP (launch.h PSPL_PPSSPP) */
+	DO_PSPL_PPS };
 
 extern unsigned frame;		/* 1/60 s since the app started */
+extern unsigned long long ui_now_s;	/* v0.67: the console clock, seconds (main.c keeps it; for "2 hours ago") */
 extern int screen, plat;
 extern u64 (*ui_clock)(void);
 extern u64 ui_t_bgcopy, ui_t_backdrop;
@@ -46,6 +51,12 @@ void ui_prepare(void);		/* after games_scan(): titles, covers, letters, A-Z */
 void ui_draw(void);
 int  ui_pad(unsigned pressed, unsigned held);	/* returns DO_* */
 const void *ui_chosen(void);	/* the game_t to start */
+unsigned ui_nav_sig(void);	/* v0.72: changes when the pad moved or changed something (for the menu sounds) */
+unsigned mc_nav_sig(void);	/* mcard.c */
+unsigned settings_nav_sig(void);	/* settings.c, the help pages included */
+unsigned help_nav_sig(void);	/* help.c */
+struct game_s;
+int  ui_marked(void *out, int max);	/* v0.67: copies of the marked games of this list (game_t out[max]); the count */
 void ui_say(const char *s);
 void progress(const void *g, const char *head, const char *title, float done, const char *what);
 

@@ -11,7 +11,8 @@ import shutil
 import sys
 
 lr, repo = sys.argv[1], sys.argv[2]
-SRC_EXT = (".c", ".h", ".S", ".s", ".ld", ".py", ".sh", ".md", ".txt", ".csv", ".bat", ".xml")
+SRC_EXT = (".c", ".h", ".S", ".s", ".ld", ".py", ".sh", ".md", ".txt", ".csv", ".bat", ".xml",
+           ".vcg", ".fcg")	# v0.74: the RSX programs' Cg sources (app/src/shaders)
 
 
 def want_source(name):
@@ -52,19 +53,25 @@ count = 0
 count += copy_tree("app/src")
 # (expect_probe.*: a one-off tool tied to one PC's folders, left out; edat.py: it holds Sony's EDAT keys, never published)
 LEFT_OUT_TOOLS = ("edat.py",)
+# v0.74: mk_minis2.py is a bench one-off that only works with edat.py beside it: left out with it
+BENCH_ONLY = ("mk_minis2.py",)
 count += copy_tree("app/tools", keep=lambda f: (want_source(f) or f == "font_ps3_atlas.png") and not f.startswith("expect_probe")
-                   and f not in LEFT_OUT_TOOLS)
+                   and f not in LEFT_OUT_TOOLS and f not in BENCH_ONLY)
 count += copy_tree("app/db")
 count += copy_tree("app/boot")
 count += copy_tree("app/sprx")
 count += copy_tree("app/ref")
 # the PC tests: code and scripts only (no screenshots, no art file with game covers)
-count += copy_tree("app/host", skip_dirs=("shots", "shots_before", "shots_v15", "shots_v22", "shots_v27", "shots_v28", "shots_v46", "sound"))
+count += copy_tree("app/host", skip_dirs=("shots", "shots_before", "shots_v15", "shots_v22", "shots_v27", "shots_v28", "shots_v46", "sound",
+                              # v0.74: copies of older source kept while rewriting, not part of the program
+                              "backup_2026-11-24", "backup_2026-11-24_pre67"))
 for f in ("app/build_app.sh", "app/README.md", "app/setup/carrier.iso", "app/setup/carrier.png", "app/setup/tinytees.iso",
           # v0.57 / v0.59: what build_app.sh packages besides (the cover SOURCES list, no covers; Tiny Tees' own cover)
           "app/setup/cover_sources.txt", "app/setup/tinytees_cover.png", "app/setup/tinytees_cover.rgba",
           # v0.57: BearSSL's build (the library itself is fetched from bearssl.org, not copied)
           "third_party/build_bearssl.sh",
+          # v0.67: fetches NVIDIA's Cg library for cgcomp (the library itself is not copied)
+          "third_party/get_cg.sh",
           # v0.55: the webMAN shortcut templates build_app.sh makes
           "app_a01/tools/mk_templates.py"):
     copy_file(f)

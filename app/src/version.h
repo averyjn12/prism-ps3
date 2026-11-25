@@ -1,4 +1,4 @@
 #ifndef PRISM_APP_VERSION_H
 #define PRISM_APP_VERSION_H
-#define APP_VERSION	"0.66 (2026-11-24)"
+#define APP_VERSION	"0.74 (2026-11-25)"
 #endif

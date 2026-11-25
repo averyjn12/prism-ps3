@@ -84,6 +84,39 @@ static const topic_t topics[] = {
 	  "After you press X the XMB comes back and the game starts by itself a few seconds later. If it "
 	  "does not, press X on the disc icon on the XMB.\n"
 	  "A PSP game starts from PSP Launcher in the XMB's Game column." },
+	/* v0.67-v0.70 */
+	{ "Going on with the last game",
+	  "On the home screen, Triangle starts the game you played last from Prism. The line above the "
+	  "buttons says which game that is.\n"
+	  "A game's page shows how many times it was started from Prism, and how long ago.\n"
+	  "Only starts from Prism are counted, not starts from the XMB." },
+	{ "Copying several games at once",
+	  "In a games list, R2 marks the game you are on; a tick appears on its cover. Mark as many as you "
+	  "like, then press Square and choose Copy the marked games.\n"
+	  "Prism asks once where they should go and copies them one after another. Circle stops the "
+	  "game being copied and the ones after it.\n"
+	  "At the end it says how many were copied, and the first one that was not, with the reason.\n"
+	  "PS2 games on a card go to the internal drive. PS2 games on the internal drive go to the SD card." },
+	{ "Moving PS2 saves to another console or a PC",
+	  "On the Memory Card screen, X on a save offers Send to, with every USB drive and card found. "
+	  "The save is written there as a .psu file in a folder called PS2SAVES, and stays on the card too.\n"
+	  "Square brings a .psu file from a PS2SAVES folder into the memory card on screen.\n"
+	  ".psu files are what uLaunchELF on a PS2 and the PC tools for PCSX2 use, so a save can go to a "
+	  "real PS2, to a PC, or to another PS3 with Prism.\n"
+	  "Before a memory card is changed, Prism keeps a copy of it in /dev_hdd0/tmp/prism_vmc_bak." },
+	{ "PSP games in PPSSPP",
+	  "PPSSPP PS3 is another PSP emulator, made by other people, that some games run better in. It is "
+	  "not part of Prism: install it yourself if you want it.\n"
+	  "When it is installed, Square on a PSP game offers Open it in PPSSPP, and Settings can make it "
+	  "the launcher for every PSP game.\n"
+	  "Prism can only open PPSSPP: choose the game again in PPSSPP's own list. It shows only the "
+	  "games in the PSPISO folder of the internal drive, and it keeps its own saved games." },
+	{ "The picture is wrong, or Prism closes by itself",
+	  "Prism draws with the console's graphics chip. If the screen stays black or looks broken, quit "
+	  "to the XMB and start Prism again while holding L1 and R1: it then draws the old, slower way.\n"
+	  "If the graphics chip stops answering, Prism closes by itself and uses the old way from the next "
+	  "start on.\n"
+	  "/dev_hdd0/tmp/prism_gfx.log and prism_perf.log say what happened." },
 	{ "The console stops answering",
 	  "Wait one minute. If nothing changes, hold the power button until the console turns off, then "
 	  "start it again.\n"
@@ -146,6 +179,11 @@ static int wrap(int f, int x, int y, int w, int dy, int gap, col_t c, const char
 		}
 	}
 	return y;
+}
+
+unsigned help_nav_sig(void)	/* v0.72: screens.h */
+{
+	return (unsigned)page;
 }
 
 void help_open(void)

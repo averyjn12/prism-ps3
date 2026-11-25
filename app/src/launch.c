@@ -11,6 +11,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <lv2/sysfs.h>
+#include <sys/systime.h>
 #include "games.h"
 #include "webman.h"
 #include "launch.h"
@@ -304,7 +305,7 @@ static int pl_read(const char *key)
 			continue;
 		*eq = 0;
 		if (!strcmp(ln, key))
-			r = !strcmp(eq + 1, "remaster") ? PSPL_REMASTER : !strcmp(eq + 1, "minis") ? PSPL_MINIS_ : 0;
+			r = !strcmp(eq + 1, "remaster") ? PSPL_REMASTER : !strcmp(eq + 1, "minis") ? PSPL_MINIS_ : !strcmp(eq + 1, "ppsspp") ? PSPL_PPSSPP : 0;
 	}
 	fclose(f);
 	return r;
@@ -314,7 +315,8 @@ int psp_launchers_installed(void)
 {
 	sysFSStat st;
 
-	return (sysFsStat(PSPL_MINIS, &st) == 0 ? PSPL_MINIS_ : 0) | (sysFsStat(PSPL_UMD, &st) == 0 ? PSPL_REMASTER : 0);
+	return (sysFsStat(PSPL_MINIS, &st) == 0 ? PSPL_MINIS_ : 0) | (sysFsStat(PSPL_UMD, &st) == 0 ? PSPL_REMASTER : 0)
+		| (sysFsStat(PSPL_PPSSPP_SFO, &st) == 0 ? PSPL_PPSSPP : 0);	/* v0.69 */
 }
 
 const char *psp_game_key(const game_t *g)
@@ -340,6 +342,194 @@ int psp_launcher_for(const game_t *g)
 	if (!want)
 		want = PSPL_MINIS_;
 	return (have & want) ? want : have & PSPL_MINIS_ ? PSPL_MINIS_ : have & PSPL_REMASTER ? PSPL_REMASTER : 0;
+}
+
+/* ---- v0.72: PPSSPP and a game that is not on the hard disk (Bananafuzzbuddy, 11-25: "it won't launch with my SD card
+ * only HDD can we change that") ----
+ * PPSSPP lists and opens /dev_hdd0/PSPISO and nothing else (its source: PS3/frontend/Main.cpp). So the game
+ * gets a NAME there: an empty file called as the game is, and a redirect of that one path to the game on the
+ * card, asked of webMAN (/remap.ps3<path>&to=<path>: Cobra's path map, which lives in the kernel's memory
+ * until the console restarts; lr/bench used the same call for the PS2 helper, 2026-11-20). PPSSPP then sees
+ * the name in its list and reads the card through it. Only places GameOS itself can read: a card slot's
+ * FAT32 part, a USB drive. A game on a card's exFAT part cannot be reached this way.
+ *
+ * The danger is in undoing it: while the redirect lives, the name on the hard disk IS the game on the card,
+ * and deleting the name would delete the game. /unmap.ps3 is not used (lr/README: it leaves the path
+ * unreadable until a restart). So an empty file is deleted only when BOTH hold: the console has restarted
+ * since the file was made (the redirect is gone), and the path reads as an empty file. Until then it stays,
+ * and games.c passes over it (pps_is_link) so the game is not listed twice. */
+#define PPS_LINKS	"/dev_hdd0/game/PRSM00001/USRDIR/ppsspp_links.txt"	/* "<clock seconds when made> TAB <path>" a line */
+#define PPS_MAX		32
+
+static struct
+{
+	u64 when;
+	char path[300];
+} pps[PPS_MAX];
+static int n_pps = -1;	/* -1 = not read yet */
+
+static u64 pps_uptime_s(void)
+{
+	u64 t;
+
+	__asm__ volatile("mftb %0" : "=r"(t));	/* the time base counts from power-on, 79.8 MHz (setup.c) */
+	return t / 79800000ULL;
+}
+
+static u64 pps_now_s(void)
+{
+	u64 s = 0, ns = 0;
+
+	sysGetCurrentTime(&s, &ns);
+	return s;
+}
+
+static void pps_read(void)
+{
+	FILE *f = fopen(PPS_LINKS, "rb");
+	char ln[400];
+
+	n_pps = 0;
+	if (!f)
+		return;
+	while (n_pps < PPS_MAX && fgets(ln, sizeof ln, f))
+	{
+		char *tab = strchr(ln, '\t');
+
+		ln[strcspn(ln, "\r\n")] = 0;
+		if (!tab || strncmp(tab + 1, PSPL_PPSSPP_DIR, strlen(PSPL_PPSSPP_DIR)) != 0 || strlen(tab + 1) >= sizeof pps[0].path)
+			continue;
+		pps[n_pps].when = strtoull(ln, NULL, 10);
+		strcpy(pps[n_pps].path, tab + 1);
+		n_pps++;
+	}
+	fclose(f);
+}
+
+static void pps_write(void)
+{
+	FILE *f = fopen(PPS_LINKS, "wb");
+	int i;
+
+	if (!f)
+		return;
+	for (i = 0; i < n_pps; i++)
+		fprintf(f, "%llu\t%s\n", (unsigned long long)pps[i].when, pps[i].path);
+	fclose(f);
+}
+
+int pps_is_link(const char *path)
+{
+	int i;
+
+	if (n_pps < 0)
+		pps_read();
+	for (i = 0; i < n_pps; i++)
+		if (!strcmp(pps[i].path, path))
+			return 1;
+	return 0;
+}
+
+void pps_links_clean(void)
+{
+	int i, k = 0;
+
+	if (n_pps < 0)
+		pps_read();
+	for (i = 0; i < n_pps; i++)
+	{
+		sysFSStat st;
+		int restarted = pps[i].when && pps_now_s() > pps[i].when + pps_uptime_s() + 5;
+
+		if (restarted && sysFsStat(pps[i].path, &st) != 0)
+			continue;		/* gone already: forget it */
+		if (restarted && st.st_size == 0 && (st.st_mode & 0170000) != 0040000 && sysFsUnlink(pps[i].path) == 0)
+			continue;		/* an empty file and no redirect alive: deleted */
+		pps[k++] = pps[i];
+	}
+	if (k != n_pps)
+	{
+		n_pps = k;
+		pps_write();
+	}
+}
+
+/* 0 = PPSSPP will find the game under its own name in PSPL_PPSSPP_DIR */
+static int pps_link(const game_t *g, char *why, int why_n)
+{
+	static const char *const ok_at[] = { "/dev_sd/", "/dev_ms/", "/dev_cf/", "/dev_usb" };
+	const char *base = strrchr(g->path, '/');
+	char link[300], ea[700], eb[700], url[1500], resp[200];
+	sysFSStat st;
+	s32 fd;
+	int i, r, reach = 0;
+
+	base = base ? base + 1 : g->path;
+	for (i = 0; i < 4; i++)
+		if (!strncmp(g->path, ok_at[i], strlen(ok_at[i])))
+			reach = 1;
+	if (!reach || g->where == 1)
+	{
+		snprintf(why, why_n, "PPSSPP can play it from the hard disk, a USB drive or a card's first (FAT32) part only. Copy it to one of those (Square)");
+		return -45;
+	}
+	if (snprintf(link, sizeof link, "%s%s", PSPL_PPSSPP_DIR, base) >= (int)sizeof link)
+	{
+		snprintf(why, why_n, "the game's file name is too long");
+		return -45;
+	}
+	if (n_pps < 0)
+		pps_read();
+	if (!pps_is_link(link))
+	{
+		if (sysFsStat(link, &st) == 0)
+		{
+			snprintf(why, why_n, "a file of the same name is already in the hard disk's PSPISO folder: PPSSPP would play that one");
+			return -47;
+		}
+		if (n_pps >= PPS_MAX)
+		{
+			snprintf(why, why_n, "too many card games were opened in PPSSPP since the console started: restart it");
+			return -47;
+		}
+		sysFsMkdir("/dev_hdd0/PSPISO", 0777);
+		if (sysFsOpen(link, SYS_O_WRONLY | SYS_O_CREAT | SYS_O_TRUNC, &fd, NULL, 0) != 0)
+		{
+			snprintf(why, why_n, "could not make the game's name in the hard disk's PSPISO folder");
+			return -47;
+		}
+		sysFsClose(fd);
+		sysFsChmod(link, 0666);
+		pps[n_pps].when = pps_now_s();
+		strcpy(pps[n_pps].path, link);
+		n_pps++;
+		pps_write();
+	}
+	wm_urlenc(ea, sizeof ea, link);
+	wm_urlenc(eb, sizeof eb, g->path);
+	snprintf(url, sizeof url, "/remap.ps3%s&to=%s", ea, eb);
+	r = wm_get(url, resp, sizeof resp);
+	{
+		FILE *f = fopen("/dev_hdd0/tmp/prism_start.log", "a");
+
+		if (f)
+		{
+			fprintf(f, "ppsspp link: %s -> %s, webMAN %d\n", link, g->path, r);
+			fclose(f);
+		}
+	}
+	if (r != 200)
+	{
+		snprintf(why, why_n, "webMAN did not take the redirect to the card (%d)", r);
+		return -48;
+	}
+	/* in force? the name must now read as the game: its size, not an empty file's */
+	if (sysFsStat(link, &st) != 0 || st.st_size == 0 || (g->size && st.st_size != g->size))
+	{
+		snprintf(why, why_n, "the redirect to the card is not in force (the name still reads as %llu bytes)", sysFsStat(link, &st) == 0 ? (unsigned long long)st.st_size : 0ull);
+		return -48;
+	}
+	return 0;
 }
 
 /* key NULL = the default; pref 0 = no line for the key */
@@ -370,7 +560,7 @@ int psp_launcher_set(const char *key, int pref)
 		fclose(f);
 	}
 	if (pref)
-		k += snprintf(out + k, sizeof out - k, "%s=%s\n", key, pref == PSPL_REMASTER ? "remaster" : "minis");
+		k += snprintf(out + k, sizeof out - k, "%s=%s\n", key, pref == PSPL_REMASTER ? "remaster" : pref == PSPL_PPSSPP ? "ppsspp" : "minis");
 	f = fopen(PSPL_FILE, "wb");
 	if (!f)
 		return -2;
@@ -433,6 +623,28 @@ int launch_prepare(int plat, const game_t *g, spawn_t *sp, char *why, int why_n)
 		const int which = psp_launcher_for(g);
 		const char *pspl = which == PSPL_MINIS_ ? PSPL_MINIS : which == PSPL_REMASTER ? PSPL_UMD : NULL;
 
+		if (which == PSPL_PPSSPP)
+		{
+			/* v0.69: PPSSPP (launch.h). Nothing is mounted: it reads the game's file itself, from the one
+			 * folder it looks in. It is started the way the PSP launchers are (cellGameExecGame, type 2 =
+			 * a title on the hard disk); it has no way to be handed the game. */
+			if (strncmp(g->path, PSPL_PPSSPP_DIR, strlen(PSPL_PPSSPP_DIR)) != 0)
+			{
+				/* v0.72: not on the hard disk: give it a name there that leads to it (pps_link) */
+				r = pps_link(g, why, why_n);
+				if (r)
+					return r;
+			}
+			r = game_exec(2, "PPSSPP001", g->path);
+			sp->self[0] = 0;
+			if (r)
+			{
+				snprintf(why, why_n, "PPSSPP could not be started (%08x)", (unsigned)r);
+				return -46;
+			}
+			sp->ppsspp = 1;
+			return 0;
+		}
 		if (!pspl)
 		{
 			snprintf(why, why_n, "the PSP launcher (PSPC66820) is not installed: webMAN's setup can install it");

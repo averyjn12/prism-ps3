@@ -26,6 +26,7 @@ typedef struct
 	u8 where;		/* 0 /dev_sd, 1 the card read raw (PS2), 2 /dev_hdd0, 3..10 /dev_usb000..007, 11 the drive, 12 /dev_ms, 13 /dev_cf */
 	u8 shortcut;		/* kept in shortcuts.txt (manage.c) */
 	u8 slot;		/* v0.66: a PS2 game on a card (where 1): its slot, 0 Memory Stick, 1 SD, 2 CompactFlash */
+	u8 exfat;		/* v0.73: a PS2 game on a card (where 1): 1 = on the card's exFAT part, 0 = on its FAT32 part */
 	char id[12];		/* title ID from the image (SYSTEM.CNF), or empty */
 	char shown[100];	/* what the screen shows: the art file's title, else the name without extension */
 	u8 letter;		/* 0 = '#', 1..26 = A..Z */

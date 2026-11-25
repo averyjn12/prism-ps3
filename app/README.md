@@ -94,6 +94,31 @@ important, so memory-card writes may be tested on them.
 | 0.44 | 11-23 20:43 | see the run table | never reads through a game image Cobra shows in place of the drive (the "Guitar Hero II copied as Loaded" bug); IRISMAN's many-sectors-a-command CD read behind first-run checks; the list line says where every game is, PS2 games on the card too |
 | 0.45 | 11-23 21:00 | yes, 21:09 (EBOOT read back = build) | the list shows a copy's title without the " (SLUS_...)" its file name carries |
 | 0.46 | 11-23 21:15 | see the run table | Settings -> Help (10 pages, `src/help.c`); terms of use shown once per console before anything else (`TERMS.md`, `USRDIR/terms_ok.txt`); the fast CD read is OFF (it worked and was no faster: the drive reads CDs at about 4x); `tools/mk_release.py` makes the download zip with the terms first |
+| 0.47 - 0.66 | 11-23 / 11-24 | yes | not listed here: see the memory note `prism-s36-lr-stage2.md` and `HANDOFF_2026-11-24_next.md` (covers, PSP from the card, card slots, the bad-adaptor check, games from every slot) |
+| 0.67 | 11-24 23:55 | yes; **died after 11-23 s, three runs** | **the RSX draws the screens** (`src/gfx.c`, the `g_` half of `src/ui.c`, `src/shaders/`): 60.2 fps on the console against 18.7 (`logs/2026-11-25_v067_crash/`). Died each time about 1 MB of commands had been queued: the end of the whole command buffer. Continue / recently played (`src/played.c`: Triangle on HOME, "played N times"). PS2 saves as `.psu` files to and from USB drives and cards (`src/vmcw.c` vmc_export_psu / vmc_import_psu, `src/savefiles.c`; Memory Card screen: X -> Send to, Square -> Bring in). Held-direction repeat by the clock |
+| 0.68 | 11-25 00:08 | yes; **black screen, closed itself after 3 s** | command buffer rewound after every frame: WRONG (the RSX stood at the buffer's start and was sent to the buffer's start, so it drew nothing; `prism_gfx.log`: STUCK waiting for a flip, PUT = GET = 0x1000). The watchdog that closed it is from this build. Multi-game copy: R2 marks games in a list, Square -> Copy the marked games (`src/rip.c` copy_games) |
+| 0.69 | 11-25 00:19 | yes (EBOOT read back = build); **not started yet** | the rewind in two steps (wait for the frame to finish, then jump back to where the buffer stood after rsxInit); the CPU drawing left as v0.66 had it; if a wait runs out Prism closes and the same version draws on the CPU from the next start (`/dev_hdd0/tmp/prism_rsx_failed`). `host/fake_rsx.c` now models GET / PUT / jump and refuses 0.68's sequence |
+| 0.70 | 11-25 00:38 | yes (EBOOT read back = build); not started yet | PPSSPP as a third PSP launcher (Square on a PSP game, and SETTINGS): Prism opens it, the game is chosen in its own list (`launch.h` PSPL_PPSSPP). Five new help pages |
+| 0.71 | 11-25 00:42 | yes (EBOOT read back = build); **not started yet: the first run decides** | SETTINGS no longer reads the PSP launcher files for every row of every frame (12.5 ms a frame on the console in 0.67, against 1.5 ms for HOME) |
+| 0.72 | 11-25 08:40 | yes (EBOOT read back = the package's); Bananafuzzbuddy's first run owed | **Phantom presses fixed** (`pad.c`: a pad with nothing new since the last call keeps what it held; at 60 fps `ioPadGetData` answers len 0 on some frames and 0.67-0.71 read that as a release: one Cross counted up to 4 times). **Menu sounds** (`sfx.c`: one audio port for Prism's whole run, Prism's own three synthesized sounds; the opening plays through it). **Solid 3D save icons** (the RSX depth buffer, `gx_depth`; non-chosen icons darker instead of see-through). **Serials** (`discid.c`): made capital (MGS's disc says `slus_005.94`), and read from raw 2352-byte PS2 CD images (Crazy Taxi). **Covers**: a removed cover is looked up again; games with no readable serial are counted on the page and named in `prism_covers.log`. **Continue** is a list of the last five played (Triangle on HOME). **PPSSPP from a card or USB drive**: an empty file of the game's name in `/dev_hdd0/PSPISO` plus a webMAN `/remap.ps3` to the game (`launch.c pps_link`; cleaned after a restart; `rip.c` refuses to copy onto such a name) |
+| 0.73 | 11-25 08:51 | yes (EBOOT read back = the package's); not run yet | **Delete a game from a card's exFAT part** (`exfat_w.c exw_delete`, `manage.c exfat_delete`; `lr_fs.c` gained `lr_fs_cat_where`, LR_APP only). Deleting a FAT32 card game now looks on the game's OWN slot (it looked on `/dev_sd` whatever the slot) |
+| 0.74 | 11-25 09:03 | yes (EBOOT read back = the package's) | SETTINGS: "Menu sounds: on / off" (the opening keeps its sound); STORAGE lists a card's exFAT part with its free space (`exw_space`; `exd_test.sh` now 51 checks) |
+
+**PC checks added for 0.72 / 0.73** (`host/`, WSL): `pad_test.sh` (v0.71's `buttons()` must FAIL it first: it counts
+one held Cross 4 times; the new one 22 of 22), `sfx_test.sh` (38) with `sfx_mutants.sh` (8 of 8), `discid_test.sh`
+(70; give it real image heads and their serials as arguments), `gx_test.sh` now 3862 with `gx_mutants.py` 29 of 29
+(six depth-buffer bugs), `rsx_host_run.sh` 0 of 79 failed, `exw_test.sh` 25 (unchanged by the refactor into
+`prep()`), **`exd_test.sh` 46** (delete, judged by fsck.exfat, exfat-fuse, df and a stray-entry reader; its
+calibration says what fsck.exfat does NOT see) with **`exd_mutants.py` 12 of 12**. Not on the PC at all: `manage.c`'s
+and `launch.c`'s glue, the real audio port, the real RSX depth buffer.
+
+**PC checks for 0.67 - 0.71** (all in `host/`, run from WSL): `rsx_host_run.sh` (every screen drawn by the CPU
+path and by the RSX path over `fake_rsx.c`, compared picture by picture: 0 of 76 failed), `gx_test.sh`
+(3847 checks) with `gx_mutants.py` (23 of 23 planted bugs caught), `played_test.sh` (37) with
+`played_mutants.sh` (11 of 11), `psu_test.sh <mymcplus.exe>` (0 failures, judged by mymcplus) with
+`psu_mutants.py` (11 of 11), `vmcw_regress.sh` (card-to-card copies byte-identical to 0.66), `shader_check.py`
+(run by `build_app.sh`). **The stand-in is not the RSX:** 0.67's death at the buffer's end was found only on
+the console, and 0.68's fault got past the stand-in as it then was.
 
 ## Giving Prism to other people
 

@@ -49,6 +49,11 @@ void stroke(float x0, float y0, float x1, float y1, col_t c);
 void sprite_tex(const tex_t *t, float x0, float y0, float u0, float v0, float x1, float y1, float u1, float v1, col_t c);
 /* a textured triangle with colours (the 3D memory-card icons) */
 void tri_tex(const tex_t *t, const float *xy, const float *uv, const col_t *c);
+/* v0.72: the same with a depth for each corner (0 nearest .. 1 farthest), for a solid object drawn between
+ * ui_depth(1) and ui_depth(0): the nearer triangle then wins at every pixel. Only the RSX has a depth
+ * buffer; the CPU drawing ignores both and relies on the caller drawing far to near. */
+void tri_tex_z(const tex_t *t, const float *xy, const float *depth, const float *uv, const col_t *c);
+void ui_depth(int on);
 /* v0.27: copy a canvas-resolution picture (w x h, pixels equal to key skipped) with its top left at
  * canvas (XC(lx) + ox, YC(ly) + oy), blended with alpha a (GS scale, 0x80 = opaque) */
 void blit_keyed(const u32 *src, int w, int h, u32 key, float lx, float ly, int ox, int oy, int a);

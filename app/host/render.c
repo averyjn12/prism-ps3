@@ -16,11 +16,22 @@
 #include "intro.h"
 #include "look.h"
 #include "help.h"
+#include "played.h"
 void stub_console(int ok, int state, int pending);
+
+/* v0.67: three builds of this file.
+ *   (nothing)      the PC renderer: ui.c's CPU drawing into fb (render.sh)
+ *   RENDER_RSX     the real src/gfx.c draws: on the PC over host/fake_rsx.c (rsx_host.sh), or
+ *   RENDER_PS3     ... on a PS3 / RPCS3 over the real RSX (rsx_render.sh; implies RENDER_RSX)
+ * The scenes are the same in all three, so their pictures can be compared (rsx_compare.c). */
+#ifdef RENDER_PS3
+#define RENDER_RSX
+#endif
 
 static const char *card_files[8];
 static int n_card_files;
 
+#ifndef RENDER_PS3	/* on the PS3 vmc.c has its own: the cards in /dev_hdd0/savedata/vmc */
 int vmc_load_all(void)
 {
 	int i;
@@ -33,14 +44,29 @@ int vmc_load_all(void)
 			n_cards++;
 	return n_cards;
 }
+#endif
 
+#ifndef RENDER_RSX
 u32 *fb;
+#endif
 game_t games[N_PLAT][MAX_GAMES];
 int n_games[N_PLAT];
 int card_state;
 static const char *outdir;
 static const char *next_name;
 
+#ifdef RENDER_RSX
+/* v0.67: the same scenes through the real gfx.c: each one is presented, then read back from the display
+ * buffer into <outdir>/<name>.ppm */
+static void save(const char *name)
+{
+	char p[512];
+
+	snprintf(p, sizeof p, "%s/%s.ppm", outdir, name);
+	gfx_present();
+	printf("%s: dump %d, %u vertices, %u draws, %u textures sent, %u dropped\n", name, gx_dump(p), gx_stat_verts, gx_stat_draws, gx_stat_uploads, gx_stat_dropped);
+}
+#else
 int gfx_init(void) { fb = calloc(CW * CH, 4); return 0; }
 void gfx_end(void) {}
 
@@ -70,6 +96,7 @@ void gfx_present(void)
 		next_name = NULL;
 	}
 }
+#endif
 
 void games_scan(void) {}
 const char *where_name(int w) { static const char *const n[] = { "SD", "SD", "HDD", "USB 0", "USB 1", "USB 2", "USB 3", "USB 4", "USB 5", "USB 6", "USB 7", "DISC", "MS", "CF" }; return w >= 0 && w < 14 ? n[w] : "?"; }
@@ -158,10 +185,32 @@ static int showcase(void)
 
 int main(int argc, char **argv)
 {
+#ifdef RENDER_PS3
+	/* fixed places: nothing passes arguments to a PS3 program started by hand */
+	static char *fixed[] = { "render", "/dev_hdd0/tmp/prism_rsx/art.dat", "/dev_hdd0/tmp/prism_rsx/out",
+		"/dev_hdd0/tmp/prism_rsx/card0.VM2", "/dev_hdd0/tmp/prism_rsx/card1.VM2", "/dev_hdd0/tmp/prism_rsx/card2.VM1" };
+	FILE *lf;
+	int rc;
+
+	argv = fixed;
+	argc = 6;
+	freopen("/dev_hdd0/tmp/prism_rsx/log.txt", "w", stdout);
+	(void)lf;
+#else
+	int rc;
+
 	if (argc < 3)
 		return 2;
+#endif
 	outdir = argv[2];
-	gfx_init();
+	rc = gfx_init();
+#ifdef RENDER_RSX
+	printf("gfx_init %d, gpu %d (why %d)\n", rc, gfx_gpu, gfx_gpu_why);
+	fflush(stdout);
+	if (rc != 0 || !gfx_gpu)
+		return 3;
+#endif
+	(void)rc;
 	printf("art records: %d\n", art_load_from(argv[1]));
 	if (argc > 3 && !strcmp(argv[3], "showcase"))
 		return showcase();
@@ -221,6 +270,14 @@ int main(int argc, char **argv)
 	shot("games_ps1", 720);
 	next_name = "starting";
 	progress(ui_chosen(), "STARTING", ((const game_t *)ui_chosen())->shown, 0.8f, "Handing over to the PS2 side");
+#ifdef RENDER_RSX
+	{
+		char p[512];
+
+		snprintf(p, sizeof p, "%s/starting.ppm", outdir);	/* progress() presented it itself */
+		gx_dump(p);
+	}
+#endif
 	ui_pad(PAD_CIRCLE, 0);
 	ui_home_go(4);			/* MEMORY CARD */
 	for (n_card_files = 0; n_card_files + 3 < argc && n_card_files < 8; n_card_files++)
@@ -238,6 +295,7 @@ int main(int argc, char **argv)
 		}
 	}
 	shot("mc", 900);
+#ifndef RENDER_PS3
 	if (getenv("MC_BENCH"))
 	{
 		/* v0.27: time the Memory Card screen alone (its turning 3D save icons) */
@@ -253,6 +311,7 @@ int main(int argc, char **argv)
 		clock_gettime(CLOCK_MONOTONIC, &b);
 		printf("MC screen: %.2f ms/frame on this PC (300 frames)\n", ((b.tv_sec - a.tv_sec) * 1e3 + (b.tv_nsec - a.tv_nsec) / 1e6) / 300.0);
 	}
+#endif
 	ui_pad(PAD_RIGHT, 0);
 	ui_pad(PAD_RIGHT, 0);
 	shot("mc_sel2", 1500);
@@ -342,7 +401,7 @@ int main(int argc, char **argv)
 		for (k = 0; k < 4; k++)
 			ui_pad(PAD_UP, 0);
 		ui_pad(PAD_CROSS, 0);		/* Help */
-		for (k = 0; k < 11; k++)
+		for (k = 0; k < 16; k++)
 		{
 			snprintf(nm, sizeof nm, "v46_help_%02d", k + 1);
 			shot(nm, 2410 + k);
@@ -392,5 +451,97 @@ int main(int argc, char **argv)
 		card_bad_slot = 2;
 		shot("v66_ps2_sd_cf_bad", 2900);
 	}
+	{
+		/* v0.67: the Memory Card screen: a save's options with the places to send it to, the question,
+		 * the list of save files to bring in, and its question */
+		int k;
+
+		for (k = 0; k < 3; k++)
+			ui_pad(PAD_CIRCLE, 0);
+		ui_home_go(4);
+		ui_pad(PAD_CROSS, 0);
+		ui_pad(PAD_CROSS, 0);			/* a save's options */
+		shot("v67_mc_options", 2950);
+		ui_pad(PAD_UP, 0);
+		ui_pad(PAD_UP, 0);
+		ui_pad(PAD_UP, 0);			/* Cancel, Delete, Send to SD card, Send to USB 0 */
+		ui_pad(PAD_CROSS, 0);
+		shot("v67_mc_send_ask", 2960);
+		ui_pad(PAD_CIRCLE, 0);
+		ui_pad(PAD_SQUARE, 0);			/* Bring in */
+		shot("v67_mc_files", 2970);
+		ui_pad(PAD_DOWN, 0);
+		ui_pad(PAD_CROSS, 0);
+		shot("v67_mc_bring_ask", 2980);
+		ui_pad(PAD_CIRCLE, 0);
+		ui_pad(PAD_CIRCLE, 0);
+	}
+	{
+		/* v0.67: Continue on the home screen (Triangle), and a game's "played" line */
+#ifdef RENDER_PS3
+		const char *pf = "/dev_hdd0/tmp/prism_rsx/played.txt";
+#else
+		const char *pf = "/tmp/prism_render_played.txt";
+#endif
+		int k;
+
+		for (k = 0; k < 3; k++)
+			ui_pad(PAD_CIRCLE, 0);
+		remove(pf);
+		played_file(pf);
+		played_load();
+		ui_now_s = 1795000000ull;
+		played_mark(P_PS1, games[P_PS1][0].name, ui_now_s - 9 * 86400);
+		played_mark(P_PS2, "GTASA.ISO", ui_now_s - 30 * 3600);
+		played_mark(P_PS2, "GTASA.ISO", ui_now_s - 2 * 3600);
+		card_bad_slot = -1;
+		ui_prepare();
+		ui_home_go(1);
+		shot("v67_home_continue", 3000);
+		/* v0.72: Triangle opens the last five played; seven games were played, so two are left out */
+		{
+			int q, shown_n = 0;
+
+			for (q = 0; q < n_games[P_PS2] && shown_n < 5; q++)
+				if (strcmp(games[P_PS2][q].name, "GTASA.ISO"))
+				{
+					played_mark(P_PS2, games[P_PS2][q].name, ui_now_s - (40 + shown_n) * 3600);
+					shown_n++;
+				}
+			played_mark(P_PS2, "GTASA.ISO", ui_now_s - 2 * 3600);
+			ui_prepare();
+			ui_home_go(1);
+		}
+		printf("Continue: Triangle returned %d (DO_NOTHING is %d)\n", ui_pad(PAD_TRIANGLE, 0), DO_NOTHING);
+		shot("v72_home_recent", 3010);
+		ui_pad(PAD_DOWN, 0);
+		ui_pad(PAD_DOWN, 0);
+		shot("v72_home_recent_third", 3020);
+		ui_pad(PAD_CIRCLE, 0);
+		shot("v72_home_recent_closed", 3030);
+		ui_pad(PAD_TRIANGLE, 0);
+		printf("Continue: ui_pad returned %d (DO_START is %d)\n", ui_pad(PAD_CROSS, 0), DO_START);
+		shot("v67_ps2_continued", 3100);
+		ui_pad(PAD_LEFT, 0);
+		shot("v67_ps2_never_played", 3200);
+	}
+	{
+		/* v0.67: games marked with R2, and what Square offers then */
+		ui_pad(PAD_R2, 0);
+		ui_pad(PAD_RIGHT, 0);
+		ui_pad(PAD_RIGHT, 0);
+		ui_pad(PAD_R2, 0);
+		shot("v67_ps2_marked", 3300);
+		ui_pad(PAD_LEFT, 0);
+		shot("v67_ps2_marked_other", 3400);
+		ui_pad(PAD_SQUARE, 0);
+		shot("v67_ps2_marked_options", 3410);
+		ui_pad(PAD_CIRCLE, 0);
+	}
+#ifdef RENDER_RSX
+	printf("done\n");
+	fflush(stdout);
+	gfx_end();
+#endif
 	return 0;
 }

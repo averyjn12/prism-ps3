@@ -12,6 +12,10 @@
 #include "storage.h"
 #include "games.h"
 #include "manage.h"
+#include "launch.h"	/* v0.72: pps_is_link */
+#include "discid.h"	/* v0.72 */
+
+int lr_fs_cat_where(u32 i, int *exfat, u32 *part);	/* lr_fs.c, LR_APP (v0.73) */
 #include "cardcheck.h"	/* v0.65 */
 
 game_t games[N_PLAT][MAX_GAMES];
@@ -41,60 +45,18 @@ static u32 le32(const u8 *p)
 	return (u32)p[0] | ((u32)p[1] << 8) | ((u32)p[2] << 16) | ((u32)p[3] << 24);
 }
 
-/* the boot file named in a SYSTEM.CNF ("BOOT2 = cdrom0:\SLUS_209.46;1", PS1 "cdrom:\...") */
-static void cnf_id(char *out, char *b, int n)
-{
-	char *p;
-	int i;
-
-	b[n - 1] = 0;
-	for (p = b; *p; p++)
-	{
-		if (!strncmp(p, "cdrom0:", 7) || !strncmp(p, "cdrom:", 6))
-		{
-			p += (p[5] == '0') ? 7 : 6;
-			while (*p == '\\' || *p == '/')
-				p++;
-			for (i = 0; i < 11 && p[i] > ' ' && p[i] != ';'; i++)
-				out[i] = p[i];
-			out[i] = 0;
-			return;
-		}
-	}
-}
-
-/* ISO9660 walk shared by both: rd(lba, buf) reads one 2048-byte user-data sector */
-typedef int (*rd_fn)(void *ctx, u32 lba, u8 *buf);
-
-static int iso_id(void *ctx, rd_fn rd, char *out, int *is_cd)
-{
-	u8 b[2048];
-	u32 i;
-
-	out[0] = 0;
-	if (rd(ctx, 16, b) || b[0] != 1 || memcmp(b + 1, "CD001", 5))
-		return -1;
-	if (is_cd)
-		*is_cd = (b[0xAA] == 0 && b[0xAB] == 0 && b[0xAC] == 8 && b[0xAD] == 0);	/* Cobra's rule, as the stage2 */
-	if (rd(ctx, le32(b + 158), b))
-		return -2;
-	for (i = 0; i + 44 < 2048 && b[i]; i += b[i])
-	{
-		if (b[i + 32] >= 10 && !memcmp(b + i + 33, "SYSTEM.CNF", 10))
-			break;
-	}
-	if (i + 44 >= 2048 || !b[i])
-		return -3;
-	if (rd(ctx, le32(b + i + 2), b))
-		return -4;
-	cnf_id(out, (char *)b, 512);
-	return 0;
-}
-
-static int rd_card(void *ctx, u32 lba, u8 *buf)
+/* v0.72: the serial reader is discid.c (tested on the PC); these read an image's bytes for it */
+static int rd_card(void *ctx, unsigned long long off, unsigned char *buf, unsigned len)
 {
 	(void)ctx;
-	return lr_file_read((u64)lba * 2048, buf, 2048);
+	return lr_file_read(off, buf, len);
+}
+
+static int rd_stdio(void *ctx, unsigned long long off, unsigned char *buf, unsigned len)
+{
+	FILE *f = (FILE *)ctx;
+
+	return fseeko(f, (off_t)off, SEEK_SET) || fread(buf, 1, len, f) != len ? -1 : 0;
 }
 
 typedef struct { FILE *f; int sec, data; } img_t;
@@ -108,24 +70,16 @@ static int rd_img(void *ctx, u32 lba, u8 *buf)
 	return 0;
 }
 
-/* a PS1 image: 2048-byte ISO, or raw 2352-byte sectors (Mode 2 user data at +24, Mode 1 at +16) */
+/* a PS1 image: 2048-byte ISO, or raw 2352-byte sectors (discid.c tries each) */
 static void ps1_id(const char *path, char *out)
 {
-	static const int fmt[3][2] = { { 2048, 0 }, { 2352, 24 }, { 2352, 16 } };
-	img_t m;
-	int k;
+	FILE *f = fopen(path, "rb");
 
 	out[0] = 0;
-	m.f = fopen(path, "rb");
-	if (!m.f)
+	if (!f)
 		return;
-	for (k = 0; k < 3 && !out[0]; k++)
-	{
-		m.sec = fmt[k][0];
-		m.data = fmt[k][1];
-		iso_id(&m, rd_img, out, NULL);
-	}
-	fclose(m.f);
+	disc_id(f, rd_stdio, out, NULL, NULL);
+	fclose(f);
 }
 
 /* v0.63: the card can sit in any of the three slots (Bananafuzzbuddy 11-24: a microSD in a Memory Stick adaptor showed no PS2
@@ -205,10 +159,21 @@ static void scan_ps2(void)
 			snprintf(g->path, sizeof(g->path), "%s/%s", LR_GAME_DIR, nm);
 			g->where = 1;
 			g->slot = (u8)d;
+			{
+				int ex = 0;
+				u32 part = 0;
+
+				if (lr_fs_cat_where((u32)k, &ex, &part) == 0)
+					g->exfat = (u8)ex;
+			}
 			if (lr_fs_cat_open((u32)k, &size, 1) == 0)
 			{
-				if (iso_id(NULL, rd_card, g->id, &cd) == -1)
-					g->kind = 2;		/* no ISO9660 volume: a raw 2352-byte CD image */
+				int raw = 0;
+
+				/* kind 2 = a raw 2352-byte CD image. v0.72: its serial is read too (it was taken for raw
+				 * BECAUSE no volume was found at 2048 bytes a sector, and so had no serial: Crazy Taxi) */
+				if (disc_id(NULL, rd_card, g->id, &cd, &raw) == -1 || raw)
+					g->kind = 2;
 				else
 					g->kind = (u8)cd;
 			}
@@ -272,6 +237,15 @@ static void scan_dir(int plat, const char *dir, int where)
 			ok = ends_ci(name, ".iso") || ends_ci(name, ".iso.0");
 		if (!ok)
 			continue;
+		if (plat == P_PSP)
+		{
+			/* v0.72: an empty file that only stands for a card game in PPSSPP's folder is not a game (launch.h) */
+			char full[400];
+
+			snprintf(full, sizeof full, "%s/%s", dir, name);
+			if (pps_is_link(full))
+				continue;
+		}
 		memset(g, 0, sizeof(*g));
 		snprintf(g->path, sizeof(g->path), "%s/%s", dir, name);
 		if (ends_ci(name, ".0"))
@@ -531,11 +505,11 @@ static void scan_hdd_ps2(void)
 		g->size = st.st_size;
 		g->where = 2;
 		m.f = fopen(g->path, "rb");
-		m.sec = 2048;
-		m.data = 0;
 		if (m.f)
 		{
-			if (iso_id(&m, rd_img, g->id, &cd) == -1)
+			int raw = 0;
+
+			if (disc_id(m.f, rd_stdio, g->id, &cd, &raw) == -1 || raw)
 				g->kind = 2;
 			else
 				g->kind = (u8)cd;
