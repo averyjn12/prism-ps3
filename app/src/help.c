@@ -109,8 +109,9 @@ static const topic_t topics[] = {
 	  "not part of Prism: install it yourself if you want it.\n"
 	  "When it is installed, Square on a PSP game offers Open it in PPSSPP, and Settings can make it "
 	  "the launcher for every PSP game.\n"
-	  "Prism can only open PPSSPP: choose the game again in PPSSPP's own list. It shows only the "
-	  "games in the PSPISO folder of the internal drive, and it keeps its own saved games." },
+	  "PPSSPP build 314 or later starts the game at once. Settings, PPSSPP: opens its game list first, "
+	  "makes it show its own list instead, as older builds always do: choose the game again there.\n"
+	  "Quitting a game started this way goes back to the XMB. PPSSPP keeps its own saved games." },
 	{ "The picture is wrong, or Prism closes by itself",
 	  "Prism draws with the console's graphics chip. If the screen stays black or looks broken, quit "
 	  "to the XMB and start Prism again while holding L1 and R1: it then draws the old, slower way.\n"

@@ -8,6 +8,7 @@
  *        made from the app (launch_ps2_now).
  * webMAN's Auto-Play stays off; /mount_ps3 is answered once the mount is done (webman.c). */
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 #include <lv2/sysfs.h>
@@ -18,6 +19,7 @@
 #include "check.h"
 #include "pspsd.h"
 #include "cardcheck.h"	/* v0.65: card_lun */
+#include "version.h"	/* v0.80: psp_table_write */
 
 /* v0.54: the A01 helper (CECHA / CECHB) reads its own trigger file (lr.h LR_CFG_FILE, hwemu) */
 #define TRIGGER	(chk.a01 ? "/dev_hdd0/tmp/prism_a01.cfg" : "/dev_hdd0/tmp/prism_lr.cfg")
@@ -532,6 +534,120 @@ static int pps_link(const game_t *g, char *why, int why_n)
 	return 0;
 }
 
+/* ---- v0.80: how each PSP game starts, for Prism's XMB plugin (lr/vshplug), which starts games from webMAN's
+ * list and cannot read a game's DISC_ID (a game's own launcher choice is kept by DISC_ID): launch.h PSP_TABLE,
+ * rewritten after every games scan and every launcher or PPSSPP setting change. */
+void psp_table_write(void)
+{
+	static char out[32768];
+	const int have = psp_launchers_installed();
+	FILE *f;
+	int i, k;
+
+	k = snprintf(out, sizeof out, "# Prism %s: how each PSP game starts (lr/app/src/launch.c psp_table_write)\n"
+		"# m = PSP Launcher (minis), r = PSP Remaster Launcher, p = PPSSPP; the path is the game's, as Prism starts it\n"
+		"ppsspp=%d\n", APP_VERSION, !(have & PSPL_PPSSPP) ? 0 : ppsspp_direct() ? 2 : 1);
+	for (i = 0; i < n_games[P_PSP] && k < (int)sizeof out - 300; i++)
+	{
+		const int l = psp_launcher_for(&games[P_PSP][i]);
+
+		if (l)
+			k += snprintf(out + k, sizeof out - k, "%c\t%s\n", l == PSPL_PPSSPP ? 'p' : l == PSPL_REMASTER ? 'r' : 'm', games[P_PSP][i].path);
+	}
+	f = fopen(PSP_TABLE, "wb");
+	if (f)
+	{
+		fwrite(out, 1, k, f);
+		fclose(f);
+	}
+}
+
+/* ---- v0.80: PPSSPP starts the game itself (launch.h PPS_BOOT_FILE) ---- */
+int ppsspp_build(void)
+{
+	static u8 d[4096];
+	char title[200];
+	const char *b;
+	FILE *f = fopen(PSPL_PPSSPP_SFO, "rb");
+	int n;
+
+	if (!f)
+		return 0;
+	n = (int)fread(d, 1, sizeof d, f);
+	fclose(f);
+	/* "PPSSPP PS3 ver 0.2 (build 313 experimental)", "PPSSPP PS3 ver 0.2 (build 314 Prism)" */
+	if (sfo_get(d, n, "TITLE", title, sizeof title) != 0 || !(b = strstr(title, "(build ")))
+		return 0;
+	return atoi(b + 7);
+}
+
+int ppsspp_direct_on(void)
+{
+	sysFSStat st;
+
+	return sysFsStat(PPS_LIST_FILE, &st) != 0;
+}
+
+int ppsspp_direct_set(int on)
+{
+	sysFSStat st;
+	FILE *f;
+
+	if (on)
+	{
+		sysFsUnlink(PPS_LIST_FILE);
+		if (sysFsStat(PPS_LIST_FILE, &st) == 0)
+			return -1;
+	}
+	else
+	{
+		f = fopen(PPS_LIST_FILE, "wb");
+		if (!f)
+			return -1;
+		fputs("PPSSPP opens its own game list; delete this file (or Prism's Settings) to start games directly\n", f);
+		if (fclose(f))
+			return -1;
+	}
+	psp_table_write();
+	return 0;
+}
+
+int ppsspp_direct(void)
+{
+	return ppsspp_direct_on() && ppsspp_build() >= PPS_DIRECT_BUILD;
+}
+
+/* the hand-over file for PPSSPP: 0 = written and read back whole */
+static int pps_boot_write(const char *game, char *why, int why_n)
+{
+	char want[400], got[400];
+	FILE *f;
+	int n;
+
+	if (snprintf(want, sizeof want, "path=%s\n", game) >= (int)sizeof want || strchr(game, '\n'))
+	{
+		snprintf(why, why_n, "the game's path is too long for PPSSPP's start request");
+		return -49;
+	}
+	f = fopen(PPS_BOOT_FILE, "wb");
+	if (!f || fputs(want, f) < 0 || fclose(f) != 0)
+	{
+		snprintf(why, why_n, "could not write PPSSPP's start request (%s)", PPS_BOOT_FILE);
+		return -49;
+	}
+	f = fopen(PPS_BOOT_FILE, "rb");
+	n = f ? (int)fread(got, 1, sizeof got - 1, f) : -1;
+	if (f)
+		fclose(f);
+	if (n != (int)strlen(want) || memcmp(got, want, n))
+	{
+		sysFsUnlink(PPS_BOOT_FILE);
+		snprintf(why, why_n, "PPSSPP's start request did not read back as written");
+		return -49;
+	}
+	return 0;
+}
+
 /* key NULL = the default; pref 0 = no line for the key */
 int psp_launcher_set(const char *key, int pref)
 {
@@ -565,7 +681,10 @@ int psp_launcher_set(const char *key, int pref)
 	if (!f)
 		return -2;
 	fwrite(out, 1, k, f);
-	return fclose(f) == 0 ? 0 : -3;
+	if (fclose(f) != 0)
+		return -3;
+	psp_table_write();	/* v0.80 */
+	return 0;
 }
 
 int launch_prepare(int plat, const game_t *g, spawn_t *sp, char *why, int why_n)
@@ -627,22 +746,43 @@ int launch_prepare(int plat, const game_t *g, spawn_t *sp, char *why, int why_n)
 		{
 			/* v0.69: PPSSPP (launch.h). Nothing is mounted: it reads the game's file itself, from the one
 			 * folder it looks in. It is started the way the PSP launchers are (cellGameExecGame, type 2 =
-			 * a title on the hard disk); it has no way to be handed the game. */
+			 * a title on the hard disk). Build 313 has no way to be handed the game; 314 (v0.80) has: PPS_BOOT_FILE. */
+			char in_pps[320];
+			const char *base = strrchr(g->path, '/');
+			const int direct = ppsspp_direct();
+
+			snprintf(in_pps, sizeof in_pps, "%s", g->path);
 			if (strncmp(g->path, PSPL_PPSSPP_DIR, strlen(PSPL_PPSSPP_DIR)) != 0)
 			{
 				/* v0.72: not on the hard disk: give it a name there that leads to it (pps_link) */
 				r = pps_link(g, why, why_n);
 				if (r)
 					return r;
+				snprintf(in_pps, sizeof in_pps, "%s%s", PSPL_PPSSPP_DIR, base ? base + 1 : g->path);	/* pps_link's name */
+			}
+			/* v0.80: PPSSPP 314+ starts it at once: the name it knows the game by, in its start request */
+			if (direct && (r = pps_boot_write(in_pps, why, why_n)) != 0)
+				return r;
+			{
+				FILE *f = fopen(START_LOG_EARLY, "ab");
+
+				if (f)
+				{
+					fprintf(f, "ppsspp: build %d, %s%s\n", ppsspp_build(), direct ? "start request path=" : "its own list",
+						direct ? in_pps : ppsspp_direct_on() ? " (this PPSSPP cannot be handed a game)" : " (the setting)");
+					fclose(f);
+				}
 			}
 			r = game_exec(2, "PPSSPP001", g->path);
 			sp->self[0] = 0;
 			if (r)
 			{
+				if (direct)
+					sysFsUnlink(PPS_BOOT_FILE);	/* not started: no request may wait for a later start from the XMB */
 				snprintf(why, why_n, "PPSSPP could not be started (%08x)", (unsigned)r);
 				return -46;
 			}
-			sp->ppsspp = 1;
+			sp->ppsspp = direct ? 2 : 1;
 			return 0;
 		}
 		if (!pspl)

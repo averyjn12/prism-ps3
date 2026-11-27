@@ -29,6 +29,7 @@
 #include "played.h"	/* v0.67 */
 #include "sfx.h"	/* v0.72 */
 #include "pad.h"	/* v0.72 */
+#include "logcopy.h"	/* v0.81 */
 
 #define TB_HZ		79800000ULL
 
@@ -144,6 +145,7 @@ static void rescan(const char *what)
 {
 	progress(NULL, "ONE MOMENT", what, 0.4f, "SD card, hard disk, USB drives and the disc drive");
 	games_scan();
+	psp_table_write();	/* v0.80: for Prism's XMB plugin (launch.h PSP_TABLE) */
 	ui_prepare();
 }
 
@@ -261,6 +263,12 @@ static int start(const game_t *g)
 		sound_open();
 		launch_disarm();
 		snprintf(why, sizeof(why), "the PS2 hand-over was refused (lv2 0x%08x)", (u32)r);
+	}
+	else if (r == 0 && spawn.ppsspp == 2)
+	{
+		/* v0.80: PPSSPP 314+ starts the game itself (launch.h PPS_BOOT_FILE) */
+		progress(g, "STARTING", g->shown, 1.0f, "Starting it in PPSSPP");
+		return 1;
 	}
 	else if (r == 0 && spawn.ppsspp)
 	{
@@ -610,6 +618,8 @@ int main(int argc, const char *argv[])
 
 				if (psp_launcher_set(psp_game_key(g), want == def ? 0 : want) != 0)
 					snprintf(m, sizeof m, "Could not save the choice.");
+				else if (want == PSPL_PPSSPP && ppsspp_direct())	/* v0.80 */
+					snprintf(m, sizeof m, "%s will start in PPSSPP.", g->shown);
 				else if (want == PSPL_PPSSPP)	/* v0.69 */
 					snprintf(m, sizeof m, "%s will open in PPSSPP: choose it again in PPSSPP's own list.", g->shown);
 				else
@@ -761,8 +771,15 @@ int main(int argc, const char *argv[])
 		{
 			char m[80];
 
-			progress(NULL, "ONE MOMENT", "Writing the probe log", 0.5f, "/dev_hdd0/tmp/prism_app.log");
-			snprintf(m, sizeof m, "Probe log written (%d)", run_probe());
+			/* v0.81: a fresh console check and the probe, then every Prism log to a USB drive (logcopy.c) */
+			progress(NULL, "ONE MOMENT", "Writing the logs", 0.3f, "Model, firmware, Cobra, webMAN, the PS2 emulator");
+			check_console();
+			setup_read();
+			progress(NULL, "ONE MOMENT", "Writing the logs", 0.5f, "/dev_hdd0/tmp/prism_app.log");
+			run_probe();
+			progress(NULL, "ONE MOMENT", "Copying the logs", 0.8f, "To PRISM_LOGS on a USB drive");
+			logs_to_usb(m, sizeof m);
+			settings_open();
 			ui_say(m);
 			last = buttons();
 		}

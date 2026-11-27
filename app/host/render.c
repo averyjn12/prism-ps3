@@ -571,6 +571,29 @@ int main(int argc, char **argv)
 		ui_pad(PAD_CIRCLE, 0);
 		ui_pad(PAD_CIRCLE, 0);
 	}
+	{
+		/* v0.80: SETTINGS with PPSSPP installed: "starts the game outright" (build 314), switched off, and on
+		 * again with a build 313 installed (stub_v61.c render_pps_*) */
+		extern int render_pspl_have, render_pps_build;
+		int k;
+
+		for (k = 0; k < 4; k++)
+			ui_pad(PAD_CIRCLE, 0);
+		render_pspl_have = 7;
+		ui_home_go(5);
+		ui_pad(PAD_CROSS, 0);
+		for (k = 0; k < 5; k++)
+			ui_pad(PAD_DOWN, 0);
+		shot("v80_settings_ppsd_on", 3600);
+		ui_pad(PAD_CROSS, 0);
+		shot("v80_settings_ppsd_off", 3610);
+		render_pps_build = 313;
+		ui_pad(PAD_CROSS, 0);
+		shot("v80_settings_ppsd_old313", 3620);
+		render_pps_build = 314;
+		render_pspl_have = 3;
+		ui_pad(PAD_CIRCLE, 0);
+	}
 #ifdef RENDER_RSX
 	printf("done\n");
 	fflush(stdout);

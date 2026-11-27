@@ -18,7 +18,8 @@
 /* v0.46: Help first (the row the screen opens on) */
 /* v0.55: the card's PS2 games in webMAN's list, right under the setup it needs; v0.57: Game covers */
 /* v0.61: the PSP launcher games start with (launch.c psp_launcher_*) */
-enum { ACT_HELP, ACT_SETUP, ACT_WMSC, ACT_COVERS, ACT_PSPL, ACT_SOUND, ACT_RECHECK, ACT_PROBE, ACT_WMFIX, N_ACT };	/* v0.73: ACT_SOUND */
+/* v0.80: ACT_PPSD, whether PPSSPP starts the game at once (launch.h PPS_BOOT_FILE) or opens its own list */
+enum { ACT_HELP, ACT_SETUP, ACT_WMSC, ACT_COVERS, ACT_PSPL, ACT_PPSD, ACT_SOUND, ACT_RECHECK, ACT_PROBE, ACT_WMFIX, N_ACT };	/* v0.73: ACT_SOUND */
 
 static int st_covers;	/* v0.57: the Game covers page is up (covers.c) */
 
@@ -43,19 +44,22 @@ int n_dev_space;
  * screen took 12.5 ms of a frame against 1.5 ms for HOME (prism_perf.log, 2026-11-25, scr 4), nearly all
  * of a 60 Hz frame. Now asked when the screen opens, after the row is used, and once a second. */
 static int pl_have, pl_now;
+static int pp_build, pp_on;	/* v0.80: the installed PPSSPP's build, and the start-it-outright setting */
 static unsigned pl_at;
 
 static void pl_refresh(void)
 {
 	pl_have = psp_launchers_installed();
 	pl_now = psp_launcher_for(NULL);
+	pp_build = (pl_have & PSPL_PPSSPP) ? ppsspp_build() : 0;
+	pp_on = ppsspp_direct_on();
 	pl_at = frame;
 }
 
 unsigned settings_nav_sig(void)	/* v0.72: screens.h */
 {
 	return (unsigned)(st_sel * 64 + st_ask * 8 + st_yes * 4 + st_help * 2 + st_covers) + help_nav_sig() * 1024u + (unsigned)pl_now * 65536u
-		+ (unsigned)menu_sounds_on() * 524288u;
+		+ (unsigned)menu_sounds_on() * 524288u + (unsigned)pp_on * 1048576u;
 }
 
 void settings_open(void)
@@ -200,16 +204,19 @@ void settings_draw(void)
 	for (i = 0; i < n_act(); i++)
 	{
 		const int pl = pl_now;
-		const char *s = i == ACT_HELP ? "Help" : i == ACT_PROBE ? "Write a probe log" : i == ACT_RECHECK ? "Check the console again"
+		const char *s = i == ACT_HELP ? "Help" : i == ACT_PROBE ? "Write logs, copy to USB" : i == ACT_RECHECK ? "Check the console again"
 			: i == ACT_WMFIX ? "Turn webMAN's Auto-Play off" : i == ACT_WMSC ? "Put PS2 games in webMAN's list"
 			: i == ACT_COVERS ? "Game covers"
 			: i == ACT_SOUND ? (menu_sounds_on() ? "Menu sounds: on" : "Menu sounds: off")
+			: i == ACT_PPSD ? (!(pl_have & PSPL_PPSSPP) ? "PPSSPP: not installed" : !pp_on ? "PPSSPP: opens its game list first"
+				: pp_build >= PPS_DIRECT_BUILD ? "PPSSPP: starts the game outright" : "PPSSPP: start outright (needs build 314)")
 			: i == ACT_PSPL ? (pl == PSPL_REMASTER ? "PSP games start with: Remaster launcher" : pl == PSPL_PPSSPP ? "PSP games start with: PPSSPP"
 				: pl ? "PSP games start with: Minis launcher" : "PSP games: no PSP launcher installed")
 			: (su.state == SU_APP ? "Remove the PS2 setup" : "Set up PS2 play");
 		int on = i == st_sel, usable = (i != ACT_SETUP || (su.state == SU_APP || (chk.ps2_ok && su.state != SU_CONFLICT && su.shipped)))
 			&& (i != ACT_WMSC || su.state == SU_APP || su.state == SU_BENCH)
-			&& (i != ACT_PSPL || (pl_have & (pl_have - 1)) != 0);	/* v0.69: two or more to choose from */
+			&& (i != ACT_PSPL || (pl_have & (pl_have - 1)) != 0)	/* v0.69: two or more to choose from */
+			&& (i != ACT_PPSD || (pl_have & PSPL_PPSSPP));		/* v0.80 */
 		/* v0.62 (Bananafuzzbuddy 11-24: the bar no longer lined up): every row is a slot of the same height, sized from
 		 * the font's own height and the room between the PS2 lines and the note line; the bar IS the slot and
 		 * the text sits in its middle, so the two cannot drift apart however many rows there are. Seven rows
@@ -380,10 +387,30 @@ int settings_pad(unsigned pressed)
 					: have == PSPL_REMASTER ? "Only the Remaster launcher (PSPC66820) is installed." : "Only PPSSPP is installed.");
 			else if (psp_launcher_set(NULL, next) == 0)
 				ui_say(next == PSPL_REMASTER ? "PSP games start with the Remaster launcher (PSPC66820), unless a game has its own choice."
-					: next == PSPL_PPSSPP ? "PSP games open in PPSSPP (choose the game again in its list), unless a game has its own choice."
+					: next == PSPL_PPSSPP ? (ppsspp_direct() ? "PSP games start in PPSSPP, unless a game has its own choice."
+						: "PSP games open in PPSSPP (choose the game again in its list), unless a game has its own choice.")
 					: "PSP games start with the Minis launcher (PSPM66820), unless a game has its own choice.");
 			else
 				ui_say("Could not save the setting.");
+			pl_refresh();
+			return DO_NOTHING;
+		}
+		if (st_sel == ACT_PPSD)
+		{
+			/* v0.80: PPSSPP starts the game outright (launch.h PPS_BOOT_FILE), or opens its own list */
+			int on = !ppsspp_direct_on();
+
+			pl_refresh();
+			if (!(pl_have & PSPL_PPSSPP))
+				ui_say("PPSSPP is not installed.");
+			else if (ppsspp_direct_set(on) != 0)
+				ui_say("Could not save the setting.");
+			else if (!on)
+				ui_say("PSP games opened in PPSSPP show its own game list first: choose the game again there.");
+			else if (pp_build >= PPS_DIRECT_BUILD)
+				ui_say("PSP games opened in PPSSPP start at once, without its game list.");
+			else
+				ui_say("Saved, but this PPSSPP cannot be handed a game: install build 314 or later. Until then it shows its list.");
 			pl_refresh();
 			return DO_NOTHING;
 		}

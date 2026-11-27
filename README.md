@@ -72,7 +72,7 @@ build has only ever been run on the author's PC, so expect to adjust paths. The 
 reproducible: `bash build.sh <copy of tree> 5 name` gives `out/lr_g5.bin` byte for byte (checked
 2026-11-23).
 
-Tiny Tees, the PS2 mini golf game Prism carries (`app/setup/tinytees.iso`, version 0.12), is by the
+Tiny Tees, the PS2 mini golf game Prism carries (`app/setup/tinytees.iso`, version 0.13), is by the
 same author. It is included as a ready-made disc image.
 
 ## Licence and credits
