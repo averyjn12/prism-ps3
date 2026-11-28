@@ -490,3 +490,72 @@ int lr_msc_select(int want, int rounds)
 	lr_log("msc: no LUN with a readable medium\n");
 	return LR_E_NOMEDIUM;
 }
+
+#if defined(LR_OPL)
+/* OPL (G1U): READ(10) of n blocks at lba into lr_dma + off, the data and status stages left running
+ * (lr_hc_in2_start). lr_blk_read_poll() ends it: 1 = still running (wait 0), 0 = read, > 0 = the
+ * device failed it, < 0 = transport (LR_E_*). The caller recovers as for lr_blk_read. */
+static u32 pend_tag;
+
+int lr_blk_read_start(u32 lba, u32 n, u32 off)
+{
+	u8 *cbw = lr_dma + LR_OFF_CBW;
+	int r;
+
+	if (lr_lun < 0 || !n || n > 0xffff || lba >= lr_blk_count || n > lr_blk_count - lba)
+		return LR_E_STATE;
+
+	memset(cbw, 0, 31);
+	cbw[0] = 0x55;
+	cbw[1] = 0x53;
+	cbw[2] = 0x42;
+	cbw[3] = 0x43;
+	pend_tag = ++msc_tag;
+	put_le32(cbw + 4, pend_tag);
+	put_le32(cbw + 8, n * 512);
+	cbw[12] = 0x80;
+	cbw[13] = (u8)lr_lun;
+	cbw[14] = 10;
+	cbw[15] = 0x28;
+	cbw[17] = (u8)(lba >> 24);
+	cbw[18] = (u8)(lba >> 16);
+	cbw[19] = (u8)(lba >> 8);
+	cbw[20] = (u8)lba;
+	cbw[22] = (u8)(n >> 8);
+	cbw[23] = (u8)n;
+	if (lr_dev.subclass == 0x02 || lr_dev.subclass == 0x05)
+	{
+		/* ATAPI-style command sets, as lr_msc_cmd: a 12-byte packet, the LUN in byte 1's top bits. The PS3's
+		 * own reader reports 05 (G1U on the E01, 11-28: refusing it here cost a card reset per prefetch) */
+		cbw[14] = 12;
+		cbw[16] = (u8)(lr_lun << 5);
+	}
+
+	r = lr_hc_bulk(LR_Q_OUT, LR_OFF_CBW, 31, 2000);
+	if (r)
+		return r;
+	memset(lr_dma + LR_OFF_CSW, 0, 16);
+	return lr_hc_in2_start(off, n * 512, LR_OFF_CSW, 13);
+}
+
+int lr_blk_read_poll(int wait)
+{
+	u8 *csw = lr_dma + LR_OFF_CSW;
+	int r = lr_hc_in2_poll(5000, wait);
+
+	if (r)
+		return r;
+	if (csw[0] != 0x55 || csw[1] != 0x53 || csw[2] != 0x42 || csw[3] != 0x53 || csw[4] != (u8)pend_tag ||
+		csw[5] != (u8)(pend_tag >> 8) || csw[6] != (u8)(pend_tag >> 16) || csw[7] != (u8)(pend_tag >> 24))
+	{
+		lr_log("msc: bad status block (in flight) %02x%02x%02x%02x tag %02x%02x%02x%02x\n", csw[0], csw[1], csw[2], csw[3],
+			csw[4], csw[5], csw[6], csw[7]);
+		return LR_E_STATE;
+	}
+	if (csw[12] == 0)
+		return 0;
+	if (csw[12] == 1)
+		return 1;
+	return LR_E_STATE;
+}
+#endif

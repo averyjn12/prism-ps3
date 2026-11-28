@@ -89,6 +89,10 @@ u8 lr_swap;	/* 1 = the bridge reverses the bytes inside each 32-bit word of DATA
 u32 lr_hc_tok;	/* A01 (2026-11-27): the halted qTD's token of the last failed transfer, so a caller can
 		 * tell "nobody answered" (Halted + XactErr only) from "someone answered wrongly" */
 #endif
+#if defined(LR_OPL)
+u32 lr_hc_rawin_off;	/* OPL (G1U): IN data at this offset is left as the wire put it; the caller
+			 * undoes the bridge's swap while it copies (one pass over uncached memory) */
+#endif
 
 static u64 op, pbase, bbase;
 static u32 *ring_sent;
@@ -710,8 +714,157 @@ int lr_hc_bulk(int q, u32 off, u32 len, u32 timeout_ms)
 	r = run(q, n, timeout_ms);
 
 	/* OUT: put the caller's bytes back as they were. IN: bring what arrived into byte order. */
+#if defined(LR_OPL)
+	if (lr_swap && (pid == PID_OUT || r == 0 || r == LR_E_SHORT) && !(pid == PID_IN && lr_hc_rawin_off && off == lr_hc_rawin_off))
+#else
 	if (lr_swap && (pid == PID_OUT || r == 0 || r == LR_E_SHORT))
+#endif
 		swap_words(lr_dma + off, len);
 
 	return r;
 }
+
+#if defined(LR_OPL)
+/* ---------------------------------------------------------------- OPL (G1U): one transfer in flight
+ *
+ * An IN data stage plus the 13-byte status after it, chained on our IN queue head and handed to the
+ * controller WITHOUT waiting: the emulator gets its sectors back while the card fills the next ones.
+ * lr_hc_in2_poll() ends it, the same way run() ends a transfer (and the same faults); nothing else may
+ * use the bus while one is in flight (lr_opl.c finishes it first, always). */
+static u32 pend_n, pend_off1, pend_len1, pend_off2, pend_len2;
+static u64 pend_end;
+
+int lr_hc_in2_start(u32 off1, u32 len1, u32 off2, u32 len2)
+{
+	u32 *h = QH(LR_Q_IN), done = 0;
+	int n = 0, r;
+
+	if (!attached || broken || pend_n || !len1 || !len2 || len2 > TD_MAX || off1 + len1 > LR_DMA_SZ ||
+		off2 + len2 > LR_DMA_SZ || ((off1 | off2) & 3))
+		return LR_E_STATE;
+	while (done < len1)
+	{
+		u32 chunk = len1 - done;
+
+		if (chunk > TD_MAX)
+			chunk = TD_MAX;
+		n++;
+		done += chunk;
+	}
+	if (n + 1 > N_TD)
+		return LR_E_STATE;
+
+	r = alive();
+	if (r)
+		return r;
+	if ((vrd(h + 6) & T_ACTIVE) || !(vrd(h + 4) & LINK_T))
+	{
+		lr_log("hc: queue head %d busy (tok %08x next %08x)\n", LR_Q_IN, vrd(h + 6), vrd(h + 4));
+		return LR_E_STATE;
+	}
+	if (vrd(h + 6) & T_HALTED)
+		qh_idle(h);
+
+	for (n = 0, done = 0; done < len1; n++)
+	{
+		u32 chunk = len1 - done;
+
+		if (chunk > TD_MAX)
+			chunk = TD_MAX;
+		td_fill(n, PID_IN, 0, bus_of(lr_dma + off1 + done), chunk, 0);
+		done += chunk;
+	}
+	td_fill(n++, PID_IN, 0, bus_of(lr_dma + off2), len2, 1);
+
+	pend_n = (u32)n;
+	pend_off1 = off1;
+	pend_len1 = len1;
+	pend_off2 = off2;
+	pend_len2 = len2;
+	pend_end = 0;
+	vwr(h + 5, LINK_T);
+	__asm__ volatile("sync");
+	vwr(h + 4, bus_of(TD(0)));
+	__asm__ volatile("sync");
+	return 0;
+}
+
+/* 1 = still running (wait 0 only), else 0 or LR_E_* as run(). The data stage is swapped back to byte
+ * order unless it sits at lr_hc_rawin_off; the status always is. */
+int lr_hc_in2_poll(u32 timeout_ms, int wait)
+{
+	u32 *h = QH(LR_Q_IN);
+	int r, i, n = (int)pend_n;
+
+	if (!n)
+		return LR_E_STATE;
+	if (!pend_end)
+		pend_end = lr_tb() + (u64)timeout_ms * LR_TB_PER_MS;
+	for (;;)
+	{
+		r = 1;
+		for (i = 0; i < n; i++)
+		{
+			u32 t = vrd(TD(i) + 2);
+
+			if (t & T_HALTED)
+			{
+#if defined(PS2HWEMU)
+				lr_hc_tok = t;
+#endif
+				r = (t & T_ERRBITS) ? LR_E_XACT : LR_E_STALL;
+				break;
+			}
+			if (t & T_ACTIVE)
+				break;
+			if ((t >> 16) & 0x7fff)
+			{
+				r = LR_E_SHORT;
+				break;
+			}
+			if (i == n - 1)
+			{
+				r = 0;
+				break;
+			}
+		}
+		if (r <= 0)
+			break;
+		if ((s64)(lr_tb() - pend_end) > 0)
+		{
+			r = LR_E_TIMEOUT;
+			break;
+		}
+		if (!wait)
+			return 1;
+	}
+	pend_n = 0;
+
+	if (r < 0 && n_faillog < 16)
+	{
+		n_faillog++;
+		lr_log("hc: in2 fail %d n %d td %08x %08x %08x %08x ov cur %08x next %08x tok %08x sts %08x p1 %08x\n", r, n,
+			vrd(TD(0) + 2), vrd(TD(1) + 2), vrd(TD(2) + 2), vrd(TD(3) + 2), vrd(h + 3), vrd(h + 4), vrd(h + 6),
+			lr_rd(op, USBSTS), lr_rd(op, PORTSC1));
+	}
+	if (r == LR_E_STALL || r == LR_E_XACT)
+		qh_idle(h);
+	else if (r == LR_E_TIMEOUT)
+	{
+		lr_log("hc: timeout on the transfer in flight, tok %08x\n", vrd(h + 6));
+		lr_hc_port_reset();
+	}
+	if (lr_swap && (r == 0 || r == LR_E_SHORT))
+	{
+		if (!(lr_hc_rawin_off && pend_off1 == lr_hc_rawin_off))
+			swap_words(lr_dma + pend_off1, pend_len1);
+		swap_words(lr_dma + pend_off2, pend_len2);
+	}
+	return r;
+}
+
+int lr_hc_in2_busy(void)
+{
+	return pend_n != 0;
+}
+#endif

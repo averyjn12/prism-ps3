@@ -1065,6 +1065,28 @@ int lr_fs_cat_where(u32 i, int *exfat, u32 *part)
 	*part = vols[cat[i].nd.vol].part;
 	return 0;
 }
+
+/* the Prism app only (1.00): path on the exFAT volume(s) alone. A game listed from a card's or a USB drive's exFAT
+ * part may have a FAT32 file of the same name beside it (the copy it was made from): lr_fs_open tries the volumes in
+ * order and finds the FAT32 one first (11-27: an "exFAT" PS1 start served the FAT32 copy's sectors). Not compiled
+ * into any stage2. */
+int lr_fs_open_exfat(const char *path, u64 *size)
+{
+	u32 v;
+	int r;
+
+	ext_reset();
+	for (v = 0; v < n_vol; v++)
+	{
+		if (vols[v].type != FS_EXFAT)
+			continue;
+		r = open_on(v, path, size);
+		if (r != LR_E_NOFILE)
+			return r;
+	}
+	lr_log("fs: not on an exFAT part: %s\n", path);
+	return LR_E_NOFILE;
+}
 #endif
 
 int lr_file_read(u64 off, u8 *dst, u32 len)

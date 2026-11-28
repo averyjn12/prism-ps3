@@ -29,6 +29,7 @@
 #include "version.h"
 
 int lr_fs_run(u32 i, u32 *lba, u32 *n);	/* lr_fs.c, LR_APP */
+int lr_fs_open_exfat(const char *path, u64 *size);	/* lr_fs.c, LR_APP (1.00): the exFAT volume(s) only */
 
 #define DIR_	"/dev_hdd0/tmp/prism_psp"
 #define HDR	DIR_ "/card.hdr"
@@ -117,6 +118,22 @@ static void unmount(void)
 	mounted[0] = 0;
 }
 
+/* v0.82: the k-th of the 10 places same_bytes() looks at, and a fingerprint of the bytes there */
+static void place(int k, u64 size, u64 *off, u32 *len)
+{
+	*off = k == 0 ? 0 : k == 9 ? (size > CHUNK ? size - CHUNK : 0) : (size / 9 * k) & ~2047ull;
+	*len = size - *off < CHUNK ? (u32)(size - *off) : CHUNK;
+}
+
+static u64 fnv64(const u8 *p, u32 n)
+{
+	u64 h = 0xCBF29CE484222325ull;
+
+	while (n--)
+		h = (h ^ *p++) * 0x100000001B3ull;
+	return h;
+}
+
 int pspsd_mounted(const char *path)
 {
 	return mounted[0] && !strcmp(path, NTFS);
@@ -124,34 +141,38 @@ int pspsd_mounted(const char *path)
 
 int pspsd_prepare(const void *gv, char *path_out, int n, char *why, int wn)
 {
-	static const struct { u8 where; const char *dir; u64 dev; } slot[3] = {
-		{ 0, "/dev_sd", ST_DEV_SD }, { WHERE_MS, "/dev_ms", ST_DEV_MS }, { WHERE_CF, "/dev_cf", ST_DEV_CF } };
 	const game_t *g = (const game_t *)gv;
-	const char *leaf = strrchr(g->path, '/');
+	const char *leaf = strrchr(g->path, '/'), *slash;
+	u64 dev = game_raw_dev(g), want[10];	/* v0.82: a card slot or a USB port (games.c); exFAT fingerprints */
+	char dir[16];
+	size_t L;
 	static uint32_t lba[MAX_RUNS], cnt[MAX_RUNS];
 	static u8 hdr[FI_HDR_SIZE], args[FI_ARGS_MAX];
 	u8 *a = NULL, *b = NULL;
 	sysFSStat st;
 	u64 size = 0;
-	int s, r, k, nr = 0, len, attached = 0;
+	int r, k, nr = 0, len, attached = 0;
 	char enc[300], url[340], resp[200];
 
 	mounted[0] = 0;
 	lg = fopen(LOGF, "a");
 	say("=== PSP game from the card, app v%s: %s", APP_VERSION, g->path);
-	for (s = 0; s < 3 && slot[s].where != g->where; s++)
-		;
-	if (s == 3 || strncmp(g->path, slot[s].dir, strlen(slot[s].dir)) || g->path[strlen(slot[s].dir)] != '/' || !leaf)
+	/* v0.82: the device's GameOS name is the path's first part ("/dev_sd", "/dev_usb003": an exFAT USB drive's) */
+	slash = g->path[0] == '/' ? strchr(g->path + 1, '/') : NULL;
+	L = slash ? (size_t)(slash - g->path) : 0;
+	if (!dev || !L || L >= sizeof dir || !leaf)
 	{
-		snprintf(why, wn, "not in a card slot");
+		snprintf(why, wn, "not on a card or a USB drive Prism reads");
 		goto fail;
 	}
+	memcpy(dir, g->path, L);
+	dir[L] = 0;
 	if (!ends_iso(leaf + 1))
 	{
 		snprintf(why, wn, "only a plain .iso can be served this way");
 		goto fail;
 	}
-	if (sysFsStat(g->path, &st) != 0 || !st.st_size)
+	if (!g->exfat && (sysFsStat(g->path, &st) != 0 || !st.st_size))
 	{
 		snprintf(why, wn, "the system cannot see the file");
 		goto fail;
@@ -166,8 +187,8 @@ int pspsd_prepare(const void *gv, char *path_out, int n, char *why, int wn)
 	/* 1. the image's runs, by the card's raw sectors. v0.64: each step logged, and the card reader's own lines (lr_log)
 	 * go to this log too (Bananafuzzbuddy 11-24: from the CF slot it stopped here with -5 and no reason) */
 	fsport_log = lg;
-	r = fsport_attach(slot[s].dev);
-	say("  slot %s: open %d", slot[s].dir, r);
+	r = fsport_attach(dev);
+	say("  device %s (%llx): open %d", dir, (unsigned long long)dev, r);
 	attached = r == 0;
 	if (r == 0)
 	{
@@ -176,13 +197,13 @@ int pspsd_prepare(const void *gv, char *path_out, int n, char *why, int wn)
 	}
 	if (r == 0)
 	{
-		r = lr_fs_open(g->path + strlen(slot[s].dir), &size);
-		say("  file %s: %d, %llu bytes", g->path + strlen(slot[s].dir), r, (unsigned long long)size);
+		r = g->exfat ? lr_fs_open_exfat(g->path + L, &size) : lr_fs_open(g->path + L, &size);	/* 1.00: see ps3sd.c */
+		say("  file %s: %d, %llu bytes", g->path + L, r, (unsigned long long)size);
 	}
 	fsport_log = NULL;
-	if (r || size != (u64)st.st_size)
+	if (r || !size || (!g->exfat && size != (u64)st.st_size))
 	{
-		snprintf(why, wn, "the card reader could not open it in %s (%s, %d)", slot[s].dir,
+		snprintf(why, wn, "the card reader could not open it in %s (%s, %d)", dir,
 			!attached ? "the slot" : r ? "the partitions or the file" : "a different size", r);
 		goto fail;
 	}
@@ -194,13 +215,40 @@ int pspsd_prepare(const void *gv, char *path_out, int n, char *why, int wn)
 		goto fail;
 	}
 	say("  %llu bytes in %d run(s), first at card sector %u", (unsigned long long)size, nr, lba[0]);
-	/* 2. the runs give the system's bytes */
-	if (same_bytes(g->path, size, a, b, 1))
+	/* 2. the runs give the system's bytes. v0.82: on an exFAT volume there is no system file: the image must be a PSP
+	 * disc (ISO 9660 at sector 16, system "PSP GAME"), and 10 places are fingerprinted through the card reader now and
+	 * compared through /dev_bdvd after the mount (never both at once) */
+	if (!g->exfat)
 	{
-		snprintf(why, wn, "the card reader and the system disagree about the file");
-		goto fail;
+		if (same_bytes(g->path, size, a, b, 1))
+		{
+			snprintf(why, wn, "the card reader and the system disagree about the file");
+			goto fail;
+		}
+		say("  card reader = system file at 10 places");
 	}
-	say("  card reader = system file at 10 places");
+	else
+	{
+		if (lr_file_read(16 * 2048, a, 2048) || a[0] != 1 || memcmp(a + 1, "CD001", 5) || memcmp(a + 8, "PSP GAME", 8))
+		{
+			snprintf(why, wn, "not a PSP disc image (no PSP GAME volume at sector 16)");
+			goto fail;
+		}
+		for (k = 0; k < 10; k++)
+		{
+			u64 off;
+			u32 n2;
+
+			place(k, size, &off, &n2);
+			if (lr_file_read(off, b, n2))
+			{
+				snprintf(why, wn, "the card reader could not read the image at %llu", (unsigned long long)off);
+				goto fail;
+			}
+			want[k] = fnv64(b, n2);
+		}
+		say("  a PSP disc on an exFAT volume: 10 places read through the card reader");
+	}
 	fsport_detach();
 	attached = 0;
 	/* 3. the header and the .ntfs file; webMAN mounts it */
@@ -210,7 +258,7 @@ int pspsd_prepare(const void *gv, char *path_out, int n, char *why, int wn)
 		snprintf(why, wn, "could not write the disc header");
 		goto fail;
 	}
-	len = fi_args(slot[s].dev, HDR, lba, cnt, nr, args, sizeof args);
+	len = fi_args(dev, HDR, lba, cnt, nr, args, sizeof args);
 	if (len < 0 || write_file(NTFS, args, (u32)len))
 	{
 		snprintf(why, wn, "could not write the sector list");
@@ -252,10 +300,22 @@ int pspsd_prepare(const void *gv, char *path_out, int n, char *why, int wn)
 			snprintf(why, wn, "the disc webMAN made does not hold the image");
 			goto fail_mounted;
 		}
-		if (same_bytes(g->path, size, a, b, 0))
+		if (!g->exfat && same_bytes(g->path, size, a, b, 0))
 		{
 			snprintf(why, wn, "the disc webMAN made gives other bytes than the card");
 			goto fail_mounted;
+		}
+		for (k = 0; g->exfat && k < 10; k++)
+		{
+			u64 off;
+			u32 n2;
+
+			place(k, size, &off, &n2);
+			if (sys_read(mounted, off, b, n2) || fnv64(b, n2) != want[k])
+			{
+				snprintf(why, wn, "the disc webMAN made gives other bytes than the card (at %llu)", (unsigned long long)off);
+				goto fail_mounted;
+			}
 		}
 		say("  %s = the card's file at 10 places: ready", mounted);
 	}

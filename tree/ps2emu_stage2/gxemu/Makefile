@@ -41,7 +41,13 @@ CFLAGS += -DPRISM_LR=$(LR_GATE) -I../prism -fno-delete-null-pointer-checks
 OBJS += ../prism/lr_main.o ../prism/lr_log.o ../prism/lr_probe.o
 ifeq ($(LR_GATE),5)
 # gate 5 makes no hypercall at all: no UDP mirror, no lv1 wrappers (and it needs the room)
+ifeq ($(LR_OPL),1)
+# OPL for Prism (lr/opl/DESIGN.md): the card window instead of the file system and card layer
+CFLAGS += -DLR_OPL=1
+OBJS += ../prism/lr_hc.o ../prism/lr_usb.o ../prism/lr_opl.o
+else
 OBJS += ../prism/lr_hc.o ../prism/lr_usb.o ../prism/lr_fs.o ../prism/lr_card.o
+endif
 else
 OBJS += ../prism/lr_net.o ../../lv1/src/hvcall.o ../../lv1/src/device.o
 endif

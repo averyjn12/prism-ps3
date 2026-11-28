@@ -34,6 +34,8 @@ extern int gfx_gpu;		/* 1 = the RSX draws (set by gfx_init) */
 extern int gfx_soft_wanted;	/* set before gfx_init() to keep the CPU drawing */
 #define GFX_RSX_FAILED	"/dev_hdd0/tmp/prism_rsx_failed"	/* v0.69: holds the version whose RSX drawing stopped answering */
 extern int gfx_dead;		/* v0.68: the RSX stopped answering (prism_gfx.log says where): nothing more is drawn, main.c closes Prism */
+extern volatile int gx_lent;		/* 1.00: busy.c holds the drawing (a loading screen while the app waits) */
+extern void (*gx_take_back)(void);	/* busy.c: take it back */
 extern int gfx_gpu_why;		/* why the RSX is not drawing: 0 it is, 1 asked for, negative = the set-up step that failed */
 
 /* the font texture: the coverage map of font_ps3.h (GX_FONT_W x GX_FONT_H) with a band of opaque

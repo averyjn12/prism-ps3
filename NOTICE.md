@@ -33,3 +33,7 @@ IRISMAN (Estwald, aldostools), and the Linux kernel's `ps3rom` and `sr` drivers.
 started through webMAN MOD and Cobra.
 
 Thank you to everyone whose published work made this possible.
+
+And to the testers: ZavEntNet (LoquendoPS32009 on Reddit), whose logs got PS2 games from the SD card
+working on the CECHA01, and OwnChemistry5143 on Reddit, who tested and confirmed Prism on the CECHC01
+(`THANKS.md`).

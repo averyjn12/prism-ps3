@@ -33,7 +33,13 @@ elif sys.argv[1] == "create":
     ver, sha = sys.argv[2], sys.argv[3]
     notes = open(os.path.join(OUT, "RELEASE_NOTES_%s.md" % ver), encoding="utf-8").read()
     assert "(what is new goes here)" not in notes
-    body = {"tag_name": "v" + ver, "target_commitish": sha, "name": "Prism " + ver, "body": notes, "draft": True, "prerelease": True}
+    # 1.00 on (Bananafuzzbuddy, 2026-11-27): every release carries the thanks block (app/repo/THANKS.md, added by mk_release.py)
+    thanks = open(os.path.join(OUT, "..", "repo", "THANKS.md"), encoding="utf-8").read().strip()
+    if thanks not in notes:
+        sys.exit("the release notes do not carry app/repo/THANKS.md: run mk_release.py again")
+    # 1.00 is a full release, not a pre-release (Bananafuzzbuddy, 2026-11-27); a draft until Bananafuzzbuddy publishes it, as always
+    pre = float(ver) < 1.0
+    body = {"tag_name": "v" + ver, "target_commitish": sha, "name": "Prism " + ver, "body": notes, "draft": True, "prerelease": pre}
     r = call(API + "/releases", json.dumps(body).encode())
     print("created draft %s, tag %s at %s" % (r["id"], r["tag_name"], sha[:7]))
     z = os.path.join(OUT, "Prism_%s.zip" % ver)

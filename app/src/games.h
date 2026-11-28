@@ -55,4 +55,5 @@ int  game_icon0(const char *path, int plat, u8 *buf, u32 cap);
 
 /* one UTF-8 key of a PARAM.SFO image (games.c) */
 int sfo_get(const u8 *d, int n, const char *key, char *out, int out_n);
+u64 game_raw_dev(const void *g);	/* v0.82: the raw storage device of a game on an exFAT volume (a card slot or a USB port); 0 none */
 #endif

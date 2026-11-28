@@ -594,6 +594,69 @@ void setup_read(void)
 	}
 }
 
+/* v0.82: an app update brings a new PS2 helper (and launcher image), but only setup_install() copied them, and on a
+ * console already set up (SU_APP) SETTINGS offers only "Remove": 0.82's CECHA fix (lr_hw5a) never reached the tester,
+ * whose round-2 prism_a01.log still began "PRISM LR 2026-11-24-a01k11" (the CECHA review session, 2026-11-27). So at every start, a
+ * console Prism set up whose installed file differs from the one this app carries gets this app's (the old helper kept
+ * as .old, as setup_install does). webMAN maps the helper by path: the next PS2 start uses the new file. Returns how
+ * many files were refreshed (0 - 2), or -1 (msg says which copy failed). Logged to /dev_hdd0/tmp/prism_setup.log. */
+int setup_refresh(char *msg, int n)
+{
+	FILE *lg;
+	int done = 0, r = 0, helper = 0, carrier = 0;
+
+	msg[0] = 0;
+	if (su.state != SU_APP || !su.shipped || (su.stage2 != 0 && su.carrier != 0))
+		return 0;
+	lg = fopen("/dev_hdd0/tmp/prism_setup.log", "a");
+	if (su.stage2 == 0)
+	{
+		char old[80];
+
+		snprintf(old, sizeof old, "%s.old", DST_STAGE2);
+		sysFsUnlink(old);
+		sysLv2FsRename(DST_STAGE2, old);
+		r = copy_verify(SRC_STAGE2, DST_STAGE2);
+		if (lg)
+			fprintf(lg, "refresh: %s from %s: %d (the old one kept as %s)\n", DST_STAGE2, SRC_STAGE2, r, old);
+		if (r)
+		{
+			/* the old helper back in place (the CECHA review session's review): PS2 play keeps working as before, not "a file is missing" */
+			sysFsUnlink(DST_STAGE2);
+			sysLv2FsRename(old, DST_STAGE2);
+			if (lg)
+				fprintf(lg, "refresh: the copy failed; the old helper is back as %s\n", DST_STAGE2);
+			snprintf(msg, n, "Could not update the PS2 helper (%d); the old one stays. SETTINGS: remove the PS2 setup, then set it up again.", r);
+		}
+		else
+		{
+			done++;
+			helper = 1;
+		}
+	}
+	if (!r && su.carrier == 0)
+	{
+		r = copy_verify(SRC_CARRIER, DST_CARRIER);
+		if (lg)
+			fprintf(lg, "refresh: %s: %d\n", DST_CARRIER, r);
+		if (r)
+			snprintf(msg, n, "Could not update the PS2 launcher image (%d): SETTINGS, remove the PS2 setup, then set it up again.", r);
+		else
+		{
+			done++;
+			carrier = 1;
+		}
+	}
+	if (lg)
+		fclose(lg);
+	setup_read();
+	if (r)
+		return -1;
+	snprintf(msg, n, "%s", helper && carrier ? "PS2 helper and launcher image updated for this version of Prism."
+		: helper ? "PS2 helper updated for this version of Prism." : "PS2 launcher image updated for this version of Prism.");
+	return done;
+}
+
 int ps2_ready(char *why, int n)
 {
 	if (!chk.ps2_ok)
@@ -773,7 +836,15 @@ int setup_remove(char *msg, int n)
  * deleted (setup_remove, and a game no longer on the card). */
 #include "games.h"
 #include "cardcheck.h"	/* v0.66: card_lun_for */
+#include "screens.h"	/* 1.00: name_without_id */
 #define WMSC_DIR	PS2ISO_DIR "/SDCARD"		/* lr.h LR_PIN_DIR */
+/* 1.00 (Settings "Game names: clean", a Reddit request via Bananafuzzbuddy 11-28): webMAN names a game in a sub-folder of PS2ISO
+ * "[<folder>] <name>" (webMAN-MOD include/scan/games_xml.h 1217-1235), except when the folder's name is ONE character
+ * (plen == 2: the name alone). So clean shortcuts go to PS2ISO/_ , named by the game's file name without its title ID,
+ * and each one's marker names the card file itself (path=<card path>, the same text as the start trigger, launch.c
+ * arm()) instead of path=* (the file of the shortcut's own name). The launcher's own pins stay in SDCARD. */
+#define WMSC_DIR_CLEAN	PS2ISO_DIR "/_"
+#define NAMES_CLEAN_FILE	"/dev_hdd0/game/PRSM00001/USRDIR/names_clean.txt"
 #define WMSC_LIST	"/dev_hdd0/game/PRSM00001/USRDIR/wm_shortcuts.txt"
 #define WMSC_TPL_DVD	APP_SETUP "/tpl_dvd.iso"
 #define WMSC_TPL_CD	APP_SETUP "/tpl_cd.iso"
@@ -833,11 +904,112 @@ static int wmsc_set_lun(const char *path, int lun)
 	return r;
 }
 
+int names_clean(void)
+{
+	return exists(NAMES_CLEAN_FILE);
+}
+
+int names_clean_set(int on)
+{
+	if (on)
+	{
+		FILE *f = fopen(NAMES_CLEAN_FILE, "w");
+
+		if (!f)
+			return -1;
+		fputs("1\n", f);
+		fclose(f);
+		return exists(NAMES_CLEAN_FILE) ? 0 : -1;
+	}
+	sysFsUnlink(NAMES_CLEAN_FILE);
+	return exists(NAMES_CLEAN_FILE) ? -1 : 0;
+}
+
+/* the marker's card path, or "" (no marker, or path=*) */
+static void wmsc_marker_path(const char *dst, char *out, int n)
+{
+	char m[513], *p, *e;
+	s32 fd;
+	u64 pos = 0, got = 0;
+
+	out[0] = 0;
+	if (sysFsOpen(dst, SYS_O_RDONLY, &fd, NULL, 0) != 0)
+		return;
+	memset(m, 0, sizeof m);
+	if (sysFsLseek(fd, WMSC_MARK_OFF, 0, &pos) != 0 || sysFsRead(fd, m, 512, &got) != 0)
+		got = 0;
+	sysFsClose(fd);
+	if (got != 512 || memcmp(m, "PRISMLR1", 8) || !(p = strstr(m, "\npath=")))
+		return;
+	p += 6;
+	e = strchr(p, '\n');
+	if (e)
+		*e = 0;
+	if (*p != '*')
+		snprintf(out, n, "%s", p);
+}
+
+/* where the game's shortcut lives: SDCARD/<file name> as before, or clean: _/<file name without its title ID>; a
+ * clean name another card game's shortcut already holds keeps the full file name */
+static void wmsc_path(const game_t *g, int clean, char *out, int n)
+{
+	const char *nm = leaf_of(g->path), *dot = strrchr(nm, '.');
+	char base[208], rest[208], other[208];
+
+	snprintf(out, n, "%s/%s", clean ? WMSC_DIR_CLEAN : WMSC_DIR, nm);
+	if (!clean)
+		return;
+	snprintf(base, sizeof base, "%.*s", dot ? (int)(dot - nm) : (int)strlen(nm), nm);
+	if (!name_without_id(base, rest, sizeof rest))
+		return;
+	snprintf(out, n, "%s/%s%s", WMSC_DIR_CLEAN, rest, dot ? dot : "");
+	if (exists(out) && wmsc_is_ours(out))
+	{
+		wmsc_marker_path(out, other, sizeof other);
+		if (strcmp(other, g->path))
+			snprintf(out, n, "%s/%s", WMSC_DIR_CLEAN, nm);
+	}
+}
+
+/* a clean shortcut's marker: the start trigger's own text (launch.c arm), card path and slot, newline-padded to 512 */
+static int wmsc_mark(const char *dst, const game_t *g)
+{
+	char t[512], back[512], m[8];
+	s32 fd;
+	u64 pos = 0, got = 0;
+	int k, lun = g->where == 1 ? card_lun_for(g->slot) : -1, r = -1;
+
+	if (strlen(g->path) > 199 || strchr(g->path, '\n') || g->path[0] != '/')
+		return -1;
+	memset(t, '\n', sizeof t);
+	k = snprintf(t, sizeof t, "PRISMLR1\nmode=iso\npath=%s\n", g->path);
+	if (lun >= 0)
+		k += snprintf(t + k, sizeof t - k, "lun=%d\n", lun);
+	if (k <= 0 || k >= 400)
+		return -1;
+	t[k] = '\n';
+	if (sysFsOpen(dst, SYS_O_RDWR, &fd, NULL, 0) != 0)
+		return -1;
+	if (sysFsLseek(fd, WMSC_MARK_OFF, 0, &pos) == 0 && sysFsRead(fd, m, 8, &got) == 0 && got == 8 && !memcmp(m, "PRISMLR1", 8)
+		&& sysFsLseek(fd, WMSC_MARK_OFF, 0, &pos) == 0 && sysFsWrite(fd, t, 512, &got) == 0 && got == 512
+		&& sysFsLseek(fd, WMSC_MARK_OFF, 0, &pos) == 0 && sysFsRead(fd, back, 512, &got) == 0 && got == 512
+		&& !memcmp(back, t, 512))
+		r = 0;
+	sysFsClose(fd);
+	return r;
+}
+
+/* the marker as the style wants it: clean, the card path; else path=* and the slot */
+static int wmsc_mark_for(const char *dst, const game_t *g, int clean)
+{
+	return clean ? wmsc_mark(dst, g) : wmsc_set_lun(dst, g->where == 1 ? card_lun_for(g->slot) : -1);
+}
+
 int wm_shortcuts_add(char *msg, int n)
 {
 	static char list[16384];
 	char dst[260], resp[200];
-	int i, made = 0, had = 0, skipped = 0, len;
+	int i, made = 0, had = 0, skipped = 0, len, clean;
 	FILE *f;
 
 	setup_read();
@@ -851,8 +1023,9 @@ int wm_shortcuts_add(char *msg, int n)
 		snprintf(msg, n, "This Prism is missing its shortcut templates: reinstall the .pkg.");
 		return -2;
 	}
+	clean = names_clean();
 	sysFsMkdir(PS2ISO_DIR, 0777);
-	sysFsMkdir(WMSC_DIR, 0777);
+	sysFsMkdir(clean ? WMSC_DIR_CLEAN : WMSC_DIR, 0777);
 	len = read_all(WMSC_LIST, list, sizeof list - 1);
 	list[len < 0 ? 0 : len] = 0;
 	f = fopen(WMSC_LIST, "a");
@@ -863,19 +1036,19 @@ int wm_shortcuts_add(char *msg, int n)
 
 		if (g->where != 1 || !*nm || strlen(nm) > 200)	/* the card, read raw: Prism's own card reader */
 			continue;
-		snprintf(dst, sizeof dst, WMSC_DIR "/%s", nm);
+		wmsc_path(g, clean, dst, sizeof dst);
 		if (exists(dst))
 		{
 			if (wmsc_is_ours(dst))
 			{
 				had++;
-				wmsc_set_lun(dst, card_lun_for(g->slot));	/* v0.66: the cards may sit in other slots now */
+				wmsc_mark_for(dst, g, clean);	/* v0.66: the cards may sit in other slots now */
 			}
 			else
 				skipped++;	/* someone else's file of that name: left alone */
 			continue;
 		}
-		if (copy_verify(g->kind ? WMSC_TPL_CD : WMSC_TPL_DVD, dst) != 0 || wmsc_set_lun(dst, card_lun_for(g->slot)) != 0)
+		if (copy_verify(g->kind ? WMSC_TPL_CD : WMSC_TPL_DVD, dst) != 0 || wmsc_mark_for(dst, g, clean) != 0)
 		{
 			sysFsUnlink(dst);
 			skipped++;
@@ -883,7 +1056,7 @@ int wm_shortcuts_add(char *msg, int n)
 		}
 		made++;
 		if (f)
-			fprintf(f, "%s\n", nm);
+			fprintf(f, "%s\n", dst);	/* 1.00: the whole path (the folder depends on the setting); older lines are names in SDCARD */
 	}
 	if (f)
 		fclose(f);
@@ -893,8 +1066,8 @@ int wm_shortcuts_add(char *msg, int n)
 		return -3;
 	}
 	wm_get("/refresh.ps3", resp, sizeof resp);	/* webMAN re-reads its game lists */
-	snprintf(msg, n, "%d new in webMAN's PS2 list, folder SDCARD (%d already there%s). Start them like any PS2 game, card in.",
-		made, had, skipped ? ", some skipped" : "");
+	snprintf(msg, n, "%d new in webMAN's PS2 list%s (%d already there%s). Start them like any PS2 game, card in.",
+		made, clean ? "" : ", folder SDCARD", had, skipped ? ", some skipped" : "");
 	return 0;
 }
 
@@ -903,9 +1076,8 @@ int wm_shortcut_has(const void *gv)
 {
 	const game_t *g = (const game_t *)gv;
 	char p[260];
-	const char *nm = leaf_of(g->path);
 
-	snprintf(p, sizeof p, WMSC_DIR "/%s", nm);
+	wmsc_path(g, names_clean(), p, sizeof p);
 	return exists(p) && wmsc_is_ours(p);
 }
 
@@ -915,10 +1087,10 @@ int wm_shortcut_one(const void *gv, int add, char *msg, int n)
 {
 	const game_t *g = (const game_t *)gv;
 	char dst[260], resp[200];
-	const char *nm = leaf_of(g->path);
+	const int clean = names_clean();
 	FILE *f;
 
-	snprintf(dst, sizeof dst, WMSC_DIR "/%s", nm);
+	wmsc_path(g, clean, dst, sizeof dst);
 	if (!add)
 	{
 		if (wmsc_is_ours(dst))
@@ -941,12 +1113,12 @@ int wm_shortcut_one(const void *gv, int add, char *msg, int n)
 	}
 	if (exists(dst))
 	{
-		snprintf(msg, n, wmsc_is_ours(dst) ? "%s is already in webMAN's list" : "webMAN's SDCARD folder already has another file called that", g->shown);
+		snprintf(msg, n, wmsc_is_ours(dst) ? "%s is already in webMAN's list" : "webMAN's folder already has another file called that", g->shown);
 		return 0;
 	}
 	sysFsMkdir(PS2ISO_DIR, 0777);
-	sysFsMkdir(WMSC_DIR, 0777);
-	if (copy_verify(g->kind ? WMSC_TPL_CD : WMSC_TPL_DVD, dst) != 0 || wmsc_set_lun(dst, g->where == 1 ? card_lun_for(g->slot) : -1) != 0)
+	sysFsMkdir(clean ? WMSC_DIR_CLEAN : WMSC_DIR, 0777);
+	if (copy_verify(g->kind ? WMSC_TPL_CD : WMSC_TPL_DVD, dst) != 0 || wmsc_mark_for(dst, g, clean) != 0)
 	{
 		sysFsUnlink(dst);
 		snprintf(msg, n, "Could not write the shortcut to the hard disk");
@@ -955,12 +1127,12 @@ int wm_shortcut_one(const void *gv, int add, char *msg, int n)
 	f = fopen(WMSC_LIST, "a");
 	if (f)
 	{
-		fprintf(f, "%s\n", nm);
+		fprintf(f, "%s\n", dst);	/* 1.00: the whole path */
 		fclose(f);
 	}
 	if (!wmsc_norefresh)
 		wm_get("/refresh.ps3", resp, sizeof resp);
-	snprintf(msg, n, "%s is in webMAN's PS2 list now, folder SDCARD. Start it there with the card in.", g->shown);
+	snprintf(msg, n, "%s is in webMAN's PS2 list now%s. Start it there with the card in.", g->shown, clean ? "" : ", folder SDCARD");
 	return 0;
 }
 
@@ -1017,7 +1189,7 @@ int wm_shortcut_many(const void *listv, int cnt, int add, char *msg, int n)
 	if (bad)
 		snprintf(msg, n, "%d %s webMAN's PS2 list%s. %d not: %s", did, add ? "added to" : "taken out of", tail, bad, why1);
 	else if (add)
-		snprintf(msg, n, "%d added to webMAN's PS2 list, folder SDCARD%s. Start them there with the card in.", did, tail);
+		snprintf(msg, n, "%d added to webMAN's PS2 list%s%s. Start them there with the card in.", did, names_clean() ? "" : ", folder SDCARD", tail);
 	else
 		snprintf(msg, n, "%d taken out of webMAN's PS2 list%s.", did, tail);
 	return bad ? -1 : 0;
@@ -1034,13 +1206,57 @@ static void wm_shortcuts_remove(void)
 	list[len] = 0;
 	for (p = strtok(list, "\n"); p; p = strtok(NULL, "\n"))
 	{
-		snprintf(path, sizeof path, WMSC_DIR "/%s", p);
+		if (p[0] == '/')	/* 1.00: a whole path; before, a name in SDCARD */
+			snprintf(path, sizeof path, "%s", p);
+		else
+			snprintf(path, sizeof path, WMSC_DIR "/%s", p);
 		if (wmsc_is_ours(path))
 			sysFsUnlink(path);
 	}
 	sysFsUnlink(WMSC_LIST);
 	sysFsRmdir(WMSC_DIR);	/* only if empty: the launcher's own pins may live there too */
+	sysFsRmdir(WMSC_DIR_CLEAN);
 	wm_get("/refresh.ps3", resp, sizeof resp);
+}
+
+/* 1.00: the setting changed: every card game that has a shortcut in the old style gets one in the new style instead.
+ * Only games on a card read now are moved (a shortcut of a game not on the card stays as it is, and still starts it). */
+int wm_shortcuts_restyle(int was_clean, char *msg, int n)
+{
+	char old[260], resp[200], m[220];
+	int i, moved = 0, bad = 0;
+
+	wmsc_norefresh = 1;
+	for (i = 0; i < n_games[P_PS2]; i++)
+	{
+		const game_t *g = &games[P_PS2][i];
+
+		if (g->where != 1 || g->kind >= 4)
+			continue;
+		wmsc_path(g, was_clean, old, sizeof old);
+		if (!exists(old) || !wmsc_is_ours(old))
+			continue;
+		sysFsUnlink(old);
+		m[0] = 0;
+		if (wm_shortcut_one(g, 1, m, sizeof m) == 0 && wm_shortcut_has(g))
+			moved++;
+		else
+			bad++;
+	}
+	wmsc_norefresh = 0;
+	if (!was_clean)
+		sysFsRmdir(WMSC_DIR);	/* only if empty */
+	else
+		sysFsRmdir(WMSC_DIR_CLEAN);
+	if (moved || bad)
+		wm_get("/refresh.ps3", resp, sizeof resp);
+	if (bad)
+		snprintf(msg, n, "%d of webMAN's shortcuts renamed, %d could not be: put them in again from SETTINGS.", moved, bad);
+	else if (moved)
+		snprintf(msg, n, "%d of webMAN's shortcuts renamed.", moved);
+	else
+		msg[0] = 0;
+	return bad ? -1 : 0;
 }
 
 /* v0.16: every Prism comes with Tiny Tees (Bananafuzzbuddy's PS2 homebrew, the test disc this project was

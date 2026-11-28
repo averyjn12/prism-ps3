@@ -70,3 +70,16 @@ void stub_console(int ok, int state, int pending)
 int stub_autostart = 1;
 int autostart_on(void) { return stub_autostart; }
 int autostart_set(int on, char *msg, int n) { (void)on; (void)msg; (void)n; return 0; }
+
+/* 1.00: busy.c (the loading-screen ticker) is console-only: here a loading screen is drawn once per call */
+void busy_save(const void *g, const char *head, const char *title, float done, const char *what)
+{
+	(void)g; (void)head; (void)title; (void)done; (void)what;
+}
+void busy_lend(void) {}
+
+/* 1.00: Settings "Game names: clean" (setup.c): the PC renderer keeps the setting in memory */
+static int stub_names_clean;
+int names_clean(void) { return stub_names_clean; }
+int names_clean_set(int on) { stub_names_clean = on; return 0; }
+int wm_shortcuts_restyle(int was_clean, char *msg, int n) { (void)was_clean; if (n) msg[0] = 0; return 0; }

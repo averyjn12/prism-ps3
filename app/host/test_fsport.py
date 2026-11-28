@@ -62,6 +62,26 @@ for card in ("fat32_mbr", "exfat_gpt", "fat32_super", "exfat_set", "two_part", "
             continue
         rc, out, err = run(raw, "cat", p)
         check(rc == 0 and len(out) == size and hashlib.sha256(out).hexdigest() == sha, "%s: %s by path" % (card, p))
+    if card == "two_part":
+        # 1.00: lr_fs_open_exfat opens a path on the exFAT part only (its first part is FAT32, its second exFAT; the
+        # manifest lists each part's files before that part's fsck line). A file on the FAT32 part alone must be refused,
+        # one on the exFAT part alone read byte for byte.
+        part, on = 1, {}
+        for line in open(os.path.join(EMU, "cards", "manifest.txt"), encoding="utf-8"):
+            f = line.rstrip("\n").split("|")
+            if len(f) > 2 and f[1] == card:
+                if f[0] == "fsck":
+                    part += 1
+                elif f[0] == "file":
+                    on[f[2]] = part
+        for p, pt in sorted(on.items()):
+            if p.endswith((".0", ".1", ".2")):
+                continue
+            rc, out, err = run(raw, "catx", p)
+            if pt == 1:
+                check(rc != 0 and "not on an exFAT part" in err, "%s: %s (FAT32 part) refused by the exFAT-only open" % (card, p))
+            else:
+                check(rc == 0 and hashlib.sha256(out).hexdigest() == files[p][1], "%s: %s (exFAT part) by the exFAT-only open" % (card, p))
     for k, name in enumerate(listed):
         rc, out, err = run(raw, "catn", str(k))
         p = [q for q in files if q.split("/")[-1] == name]

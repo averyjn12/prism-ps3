@@ -30,12 +30,24 @@ with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
     z.writestr("NOTICE.txt", open(os.path.join(app, "NOTICE.md"), encoding="utf-8").read())
 
 notes = os.path.join(app, "out", "RELEASE_NOTES_%s.md" % ver)
+# 2026-11-27: a second run kept wiping the "what is new" text already written for this version: it is kept now
+new = "(what is new goes here)"
+if os.path.exists(notes):
+    old = open(notes, encoding="utf-8").read()
+    head = "## Prism %s\n\n" % ver
+    if head in old and new not in old:
+        a = old.index(head) + len(head)
+        b = old.find("\n## ", a)
+        new = old[a:b if b >= 0 else len(old)].strip()
+# 1.00 on (Bananafuzzbuddy, 2026-11-27): every release thanks the testers, from ONE file (gh_release.py refuses notes without it)
+thanks = open(os.path.join(app, "repo", "THANKS.md"), encoding="utf-8").read().strip()
 with open(notes, "w", encoding="utf-8", newline="\n") as f:
     f.write("## Read this before you download\n\n")
     f.write("**By downloading `Prism_%s.zip` you agree to the terms of use below. "
             "If you do not agree, do not download it.**\n\n" % ver)
     f.write("\n".join(terms.splitlines()[5:]).strip() + "\n\n")
-    f.write("## Prism %s\n\n(what is new goes here)\n\n" % ver)
+    f.write("## Prism %s\n\n%s\n\n" % (ver, new))
+    f.write(thanks + "\n\n")
     f.write("## Licence and source\n\nGPL-3.0. The source of this exact version is this repository at the tag of the same "
             "name; `LICENSE.txt` and `NOTICE.txt` are in the zip.\n\n")
     f.write("## Installing\n\nUnzip, read `0 - READ FIRST - TERMS.txt`, copy `Prism_%s.pkg` to the console and "

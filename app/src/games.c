@@ -201,14 +201,42 @@ static void scan_ps2(void)
 	}
 }
 
-/* v0.82: PS3 ISOs on the exFAT part of every card Prism read (GameOS sees only a card's FAT32 part, whose PS3ISO
- * folder scan_dir lists). Played from the card by ps3sd.c: g->exfat = 1, g->path = "<slot dir>/PS3ISO/<name>.iso", a
- * split set by the name of its whole (its ".iso.0" part names it; the other parts are not games). */
+/* v0.82: the storage device of USB port n, as rawseciso numbers them (webMAN-MOD _Projects_/rawseciso/storage.h) */
+static u64 usb_dev(int n)
+{
+	return n < 6 ? 0x10300000000000AULL + (u64)n : 0x10300000000001FULL + (u64)(n - 6);
+}
+
+/* v0.82: the raw storage device a game on an exFAT volume is read from: a card slot's (where 0 / 12 / 13), or a USB
+ * port's (where 3 .. 10). 0 = none. ps3sd.c and manage.c's exFAT delete use it, so both always mean the same drive. */
+u64 game_raw_dev(const void *gv)
+{
+	const game_t *g = (const game_t *)gv;
+
+	if (g->where >= 3 && g->where <= 10)
+		return usb_dev(g->where - 3);
+	if (g->where == 0)
+		return ST_DEV_SD;
+	if (g->where == WHERE_MS)
+		return ST_DEV_MS;
+	if (g->where == WHERE_CF)
+		return ST_DEV_CF;
+	return 0;
+}
+
+/* v0.82: PS3 ISOs on the exFAT volume of every card Prism read and of every USB drive with one (GameOS mounts neither:
+ * a card's FAT32 part and a FAT32 USB drive are listed by scan_dir). Played from there by ps3sd.c: g->exfat = 1,
+ * g->path = "<the device's GameOS name>/PS3ISO/<name>.iso", a split set by the name of its whole (its ".iso.0" part
+ * names it; the other parts are not games). Bananafuzzbuddy 11-27: "just do Ps1 PSP and PS3 exfat usb drives". */
+typedef struct
+{
+	const char *dir;
+	u8 where, slot;
+} rawx_t;
+
 static int ps3x_cb(void *arg, const char *name, uint64_t size, int is_dir)
 {
-	static const char *const sdir[3] = { "/dev_ms", "/dev_sd", "/dev_cf" };
-	static const u8 swhere[3] = { WHERE_MS, 0, WHERE_CF };
-	int d = *(const int *)arg;
+	const rawx_t *x = (const rawx_t *)arg;
 	char nm[104];
 	size_t n;
 	game_t *g;
@@ -224,31 +252,94 @@ static int ps3x_cb(void *arg, const char *name, uint64_t size, int is_dir)
 	g = &games[P_PS3][n_games[P_PS3]++];
 	memset(g, 0, sizeof(*g));
 	snprintf(g->name, sizeof(g->name), "%s", nm);
-	snprintf(g->path, sizeof(g->path), "%s/PS3ISO/%s", sdir[d], nm);
+	snprintf(g->path, sizeof(g->path), "%s/PS3ISO/%s", x->dir, nm);
 	g->size = size;
-	g->where = swhere[d];
-	g->slot = (u8)d;
+	g->where = x->where;
+	g->slot = x->slot;
 	g->exfat = 1;
 	g->kind = 0;
+	return 0;
+}
+
+/* v0.82: PSP ISOs on the same exFAT volumes (PSPISO), played from there by pspsd.c (a plain .iso only: the fake disc
+ * webMAN serves holds one image file) */
+static int pspx_cb(void *arg, const char *name, uint64_t size, int is_dir)
+{
+	const rawx_t *x = (const rawx_t *)arg;
+	game_t *g;
+
+	if (is_dir || !size || name[0] == '.' || !ends_ci(name, ".iso") || n_games[P_PSP] >= MAX_GAMES)
+		return 0;
+	g = &games[P_PSP][n_games[P_PSP]++];
+	memset(g, 0, sizeof(*g));
+	snprintf(g->name, sizeof(g->name), "%s", name);
+	snprintf(g->path, sizeof(g->path), "%s/PSPISO/%s", x->dir, name);
+	g->size = size;
+	g->where = x->where;
+	g->slot = x->slot;
+	g->exfat = 1;
+	g->kind = 0;
+	return 0;
+}
+
+/* v0.82 / 1.00: PS1 images on the same exFAT volumes (PSXISO: .bin, .iso, .img; a .cue beside one gives its tracks),
+ * played from there by ps3sd.c ps1sd_prepare */
+static int psxx_cb(void *arg, const char *name, uint64_t size, int is_dir)
+{
+	const rawx_t *x = (const rawx_t *)arg;
+	game_t *g;
+
+	if (is_dir || !size || name[0] == '.' || n_games[P_PS1] >= MAX_GAMES
+	    || !(ends_ci(name, ".bin") || ends_ci(name, ".iso") || ends_ci(name, ".img")))
+		return 0;
+	g = &games[P_PS1][n_games[P_PS1]++];
+	memset(g, 0, sizeof(*g));
+	snprintf(g->name, sizeof(g->name), "%s", name);
+	snprintf(g->path, sizeof(g->path), "%s/PSXISO/%s", x->dir, name);
+	g->size = size;
+	g->where = x->where;
+	g->slot = x->slot;
+	g->exfat = 1;
+	g->kind = 1;		/* a CD, as scan_dir marks PS1 images */
 	return 0;
 }
 
 static void scan_ps3_cards(void)
 {
 	static const u64 devs[3] = { ST_DEV_MS, ST_DEV_SD, ST_DEV_CF };
+	static const char *const sdir[3] = { "/dev_ms", "/dev_sd", "/dev_cf" };
+	static const u8 swhere[3] = { WHERE_MS, 0, WHERE_CF };
+	static const char *const udir[8] = { "/dev_usb000", "/dev_usb001", "/dev_usb002", "/dev_usb003",
+	                                     "/dev_usb004", "/dev_usb005", "/dev_usb006", "/dev_usb007" };
 	u64 keep = card_dev;
 	exw_dev dv;
 	char why[160];
+	rawx_t x;
 	int d;
 
-	for (d = 0; d < 3; d++)
+	for (d = 0; d < 3 + 8; d++)
 	{
-		if (!(card_read_mask & (1 << d)))
-			continue;
-		card_dev = devs[d];	/* exc_open opens card_dev */
+		if (d < 3)
+		{
+			if (!(card_read_mask & (1 << d)))
+				continue;
+			card_dev = devs[d];	/* exc_open opens card_dev */
+			x.dir = sdir[d];
+			x.where = swhere[d];
+			x.slot = (u8)d;
+		}
+		else
+		{
+			card_dev = usb_dev(d - 3);	/* a drive with no exFAT volume (or none at all) stops at exc_open */
+			x.dir = udir[d - 3];
+			x.where = (u8)(3 + d - 3);
+			x.slot = 0;
+		}
 		if (exc_open(&dv, why, sizeof why) == 0)
 		{
-			exw_list(&dv, "PS3ISO", ps3x_cb, &d, why, sizeof why);
+			exw_list(&dv, "PS3ISO", ps3x_cb, &x, why, sizeof why);
+			exw_list(&dv, "PSPISO", pspx_cb, &x, why, sizeof why);	/* v0.82 */
+			exw_list(&dv, "PSXISO", psxx_cb, &x, why, sizeof why);	/* v0.82 / 1.00 */
 			exc_close();
 		}
 	}

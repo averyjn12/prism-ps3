@@ -19,6 +19,7 @@ extern setup_t su;
 
 void setup_read(void);
 int  setup_install(char *msg, int n);	/* 0 = done; msg says what happened either way */
+int  setup_refresh(char *msg, int n);	/* v0.82: a set-up console gets this app's helper at start; files refreshed, or -1 */
 int  setup_remove(char *msg, int n);
 int  ps2_ready(char *why, int n);	/* 1 = a PS2 start from the card can work right now */
 void tinytees_install(void);		/* once per install: Tiny Tees in /dev_hdd0/PS2ISO */
@@ -34,4 +35,9 @@ int  autostart_set(int on, char *msg, int n);
 void autostart_started(void);
 uint64_t wall_s(void);			/* v0.32: the console clock, seconds */
 extern uint64_t t_main_s, t_intro_s;	/* v0.32: when main() began and the intro reached t = 0 */		/* v0.29: at start: spend the marker, rewrite old lines, unmount the boot disc */
+/* 1.00 (Settings "Game names: clean"): no title ID at the front of a name (screens.c name_without_id), and webMAN's
+ * card shortcuts without the [SDCARD] tag (setup.c WMSC_DIR_CLEAN) */
+int names_clean(void);
+int names_clean_set(int on);
+int wm_shortcuts_restyle(int was_clean, char *msg, int n);
 #endif

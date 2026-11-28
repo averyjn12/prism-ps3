@@ -22,7 +22,11 @@ typedef uint32_t u32;
 typedef uint64_t u64;
 typedef int64_t  s64;
 
-#if defined(PS2HWEMU)
+#if defined(LR_OPL) && defined(PS2HWEMU)
+#define LR_VERSION	"2026-11-28-opl3c-a01"	/* the OPL helper (lr_opl.c), lr/opl/DESIGN.md */
+#elif defined(LR_OPL)
+#define LR_VERSION	"2026-11-28-opl3c"
+#elif defined(PS2HWEMU)
 #define LR_VERSION	"2026-11-27-a01a"	/* after the first CECHA log: the reader's address is probed and verified */
 #else
 #define LR_VERSION	"2026-11-22q"
@@ -224,6 +228,9 @@ extern u8 lr_swap;
 #if defined(PS2HWEMU)
 extern u32 lr_hc_tok;
 #endif
+#if defined(LR_OPL)
+extern u32 lr_hc_rawin_off;
+#endif
 extern lr_usbdev lr_dev;
 extern u32 lr_blk_count;	/* 512-byte blocks on the selected LUN */
 extern int lr_lun;
@@ -249,6 +256,13 @@ int  lr_usb_clear_halt(int q);
 int  lr_msc_cmd(u32 lun, const u8 *cb, int cblen, u32 off, u32 len);
 int  lr_msc_select(int want, int rounds);
 int  lr_blk_read(u32 lba, u32 n, u32 off);
+#if defined(LR_OPL)
+int  lr_hc_in2_start(u32 off1, u32 len1, u32 off2, u32 len2);
+int  lr_hc_in2_poll(u32 timeout_ms, int wait);
+int  lr_hc_in2_busy(void);
+int  lr_blk_read_start(u32 lba, u32 n, u32 off);
+int  lr_blk_read_poll(int wait);
+#endif
 
 /* lr_fs.c (LR-SPLIT, 2026-11-22): every FAT32 / exFAT partition of the card is mounted (MBR: the
  * four primary entries; GPT: its first four), up to LR_FS_VOLS. A game is a file in LR_GAME_DIR or
@@ -334,6 +348,40 @@ void lr_take_card(void);	/* in gxemu/main.c: point Cobra's disc state at the car
  * disc's size once, at the start (console run M1: after the switch it refused a read at sector
  * 2,197,849 of a game because the launcher image had 416). This is a full single-layer DVD. */
 #define LR_MENU_SECTORS	2298496u
+#if defined(LR_OPL)
+/* OPL for Prism (lr_opl.c, lr/opl/DESIGN.md): disc sectors, all inside LR_MENU_SECTORS.
+ * OPL-G0 (11-27, E01): a read far past the REPORTED disc size never completes, so every
+ * sector here must stay inside it. */
+#define LR_OPL_W	1048576u	/* card window start (2 GB in; the carrier must be smaller) */
+#define LR_OPL_N	524288u		/* window length: 1 GB of card */
+#define LR_OPL_C	1835008u	/* command sectors: reading C + k selects window k */
+#define LR_OPL_K	1024u		/* windows: cards up to 1 TB */
+#define LR_OPL_T	(LR_OPL_C + 2u * LR_OPL_K)	/* tuning sectors: reading T + x sets tuning x (0..255) */
+#define LR_OPL_TN	1024u
+#define LR_OPL_MAGIC	"PRISMBD1"
+#define LR_OPL_HDR_VER	2u
+/* header (little-endian u32 at byte): 0 magic[8], 8 version, 12 state (0 ready, else LR_E_*),
+ * 16/20 card blocks lo/hi, 24 block size, 28 W, 32 N, 36 C, 40 windows needed, 44 current
+ * window, 48 reads, 52 errors, 64 helper version (31 chars).
+ * Version 2 (G1S, 11-28): the step since the last header (each header read starts a new one):
+ * 96 calls, 100 sectors asked, 104 / 108 fewest / most sectors in one call, 112 us inside the
+ * helper, 116 us of that in card commands, 120 us from the first call's start to the last
+ * call's end, 124 card commands, 128 bytes served from the cache, 132 bytes read from the
+ * card; then 136 tuning, 140 card blocks per command, 144 cache on, 148 synthetic, 152 fused copy,
+ * 156 us of the helper spent copying card bytes out, 160..175 the gaps between calls (us from one
+ * call's end to the next one's start): count and total of those < 2 ms, and of those >= 2 ms;
+ * 176 prefetch on, 180 prefetches started, 184 used (the next call wanted them), 188 us waited
+ * for one to finish, 192 prefetches that failed. */
+/* Tuning x: bit 0 = read-ahead cache on; bits 1-6 = card blocks per command / 8 (0 = 64);
+ * bit 7 = synthetic (G1T): the window serves zeroes at once and never reads the card;
+ * bit 8 = fused copy (G1U): the bridge's word swap is undone while copying out, 8 bytes a load;
+ * bit 9 = prefetch (G1U, needs bit 0): when a call ends where the cache line ends, the next line's
+ * card command is started and left running while the emulator works; the next call finishes it. */
+#define LR_OPL_BUF_OFF	0x0800		/* the card buffer in our DMA block, over the META + DATA areas, */
+#define LR_OPL_BUF_SZ	0xA000		/* which in mode=opl only bring-up uses (40 KB, 80 blocks); not at
+					 * META (0x1000) so lr_hc_rawin_off never matches a bring-up read */
+#define LR_OPL_RA_DEF	64u
+#endif
 void lr_card_init(void);
 void lr_card_stats(const char *tag);
 void lr_card_tick(void);

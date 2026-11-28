@@ -1,5 +1,6 @@
 /* See pspsd_core.h. A port of webMAN-MOD prepISO's fake_iso.h (create_fake_file_iso_mem, build_fake_iso),
  * GPL-3.0, written byte-order-explicit so the PC tests produce the console's exact bytes. */
+#include <stdio.h>	/* v0.82: sscanf (psx_cue) */
 #include <string.h>
 #include "pspsd_core.h"
 #include "fake_iso_data.h"
@@ -209,4 +210,131 @@ int ps3_args(uint64_t device, const uint32_t *lba, const uint32_t *cnt, int n, u
 		be32(siz + 4 * i, cnt[i]);
 	}
 	return total;
+}
+
+int psx_args(uint64_t device, const uint32_t *lba, const uint32_t *cnt, int n, int sector_size,
+	const psx_track_t *tracks, int ntracks, uint8_t *out, int cap)
+{
+	int total, i;
+	uint32_t param;
+	uint8_t *sec, *siz, *trk;
+
+	if (n < 1 || ntracks < 1 || ntracks > PSX_MAX_TRACKS || sector_size < 2048 || sector_size > 2448)
+		return -1;
+	total = 20 + 8 * n + 8 * ntracks;
+	if (total > cap || total > FI_ARGS_MAX)
+		return -1;
+	param = sector_size == 2352 ? 0 : (sector_size % 16 ? (uint32_t)sector_size << 8 : (uint32_t)sector_size << 4);
+	memset(out, 0, total);
+	be32(out, (uint32_t)(device >> 32));
+	be32(out + 4, (uint32_t)device);
+	be32(out + 8, FI_EMU_PSX);
+	be32(out + 12, (uint32_t)n);
+	be32(out + 16, (uint32_t)ntracks | param);
+	sec = out + 20;
+	siz = sec + 4 * n;
+	trk = siz + 4 * n;
+	for (i = 0; i < n; i++)
+	{
+		if (!cnt[i])
+			return -1;
+		be32(sec + 4 * i, lba[i]);
+		be32(siz + 4 * i, cnt[i]);
+	}
+	for (i = 0; i < ntracks; i++)
+	{
+		trk[8 * i] = 0;
+		trk[8 * i + 1] = tracks[i].audio ? 0x10 : 0x14;
+		trk[8 * i + 2] = (uint8_t)(i + 1);
+		trk[8 * i + 3] = 0;
+		be32(trk + 8 * i + 4, tracks[i].lba);
+	}
+	return total;
+}
+
+/* the next word of a cue line (quoted words whole), or 0 at the end of the line */
+static int cue_word(const char **p, const char *end, char *w, int wn)
+{
+	const char *s = *p;
+	int k = 0;
+
+	while (s < end && (*s == ' ' || *s == '\t'))
+		s++;
+	if (s >= end || *s == '\r' || *s == '\n')
+	{
+		*p = s;
+		return 0;
+	}
+	if (*s == '"')
+	{
+		for (s++; s < end && *s != '"' && *s != '\n'; s++)
+			if (k < wn - 1)
+				w[k++] = *s;
+		if (s < end && *s == '"')
+			s++;
+	}
+	else
+		for (; s < end && *s != ' ' && *s != '\t' && *s != '\r' && *s != '\n'; s++)
+			if (k < wn - 1)
+				w[k++] = *s;
+	w[k] = 0;
+	*p = s;
+	return 1;
+}
+
+int psx_cue(const char *cue, int len, psx_track_t *tracks, int max)
+{
+	const char *p = cue, *end = cue + len;
+	char w[64];
+	int files = 0, n = 0, want_index = 0;
+
+	while (p < end)
+	{
+		if (cue_word(&p, end, w, sizeof w))
+		{
+			int i;
+
+			for (i = 0; w[i]; i++)
+				if (w[i] >= 'a' && w[i] <= 'z')
+					w[i] = (char)(w[i] - 'a' + 'A');
+			if (!strcmp(w, "FILE"))
+				files++;
+			else if (!strcmp(w, "TRACK"))
+			{
+				if (n == max || !cue_word(&p, end, w, sizeof w) || !cue_word(&p, end, w, sizeof w))
+					return -1;
+				for (i = 0; w[i]; i++)
+					if (w[i] >= 'a' && w[i] <= 'z')
+						w[i] = (char)(w[i] - 'a' + 'A');
+				tracks[n].audio = !strcmp(w, "AUDIO");
+				tracks[n].lba = 0xFFFFFFFFu;
+				n++;
+				want_index = 1;
+			}
+			else if (!strcmp(w, "INDEX") && n)
+			{
+				unsigned mm, ss, ff;
+
+				if (!cue_word(&p, end, w, sizeof w))
+					return -1;
+				if (!strcmp(w, "01") || !strcmp(w, "1"))
+				{
+					if (!cue_word(&p, end, w, sizeof w) || sscanf(w, "%u:%u:%u", &mm, &ss, &ff) != 3 || ss > 59 || ff > 74)
+						return -1;
+					tracks[n - 1].lba = (mm * 60 + ss) * 75 + ff;
+					want_index = 0;
+				}
+			}
+		}
+		while (p < end && *p != '\n')	/* the rest of the line */
+			p++;
+		if (p < end)
+			p++;
+	}
+	if (files != 1 || n == 0 || want_index)
+		return -1;
+	for (files = 0; files < n; files++)
+		if (tracks[files].lba == 0xFFFFFFFFu || (files && tracks[files].lba <= tracks[files - 1].lba))
+			return -1;
+	return n;
 }

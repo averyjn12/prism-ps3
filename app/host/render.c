@@ -180,6 +180,68 @@ static int showcase(void)
 		ui_pad(PAD_DOWN, 0);
 	ui_pad(PAD_CROSS, 0);			/* Game covers */
 	shot("10_game_covers", 1000);
+	if (getenv("PRISM_NAMES_TEST"))
+	{
+		/* 1.00: Settings "Game names: clean" (screens.c name_without_id): names from the card's real naming styles */
+		static const char *const cases[][2] = {
+			{ "SLUS_213.59.Bully", "Bully" },			/* OPL's naming */
+			{ "SLUS-21359 Bully", "Bully" },
+			{ "[SLUS-21359] Bully", "Bully" },
+			{ "(SCES-50000) Ratchet & Clank", "Ratchet & Clank" },
+			{ "SLES_123.45_Some Game", "Some Game" },
+			{ "ULUS-10041 Ridge Racer", "Ridge Racer" },		/* a PSP ID: 5 digits */
+			{ "SLUS_000.76", NULL },				/* the ID alone: kept */
+			{ "SLUS_000.76.", NULL },
+			{ "Bully", NULL },
+			{ "Grand Theft Auto - San Andreas", NULL },
+			{ "SLUS21359 Bully", NULL },				/* no separator after the letters */
+			{ "slus_213.59.Bully", NULL },				/* lower case: not an ID */
+			{ "[SLUS-21359 Bully", NULL },				/* an open bracket never closed */
+			{ "GTAS_123.45", NULL },
+			{ "ABCD-12345-Game", "Game" },
+		};
+		char out[100];
+		int bad = 0;
+		unsigned c;
+
+		for (c = 0; c < sizeof cases / sizeof cases[0]; c++)
+		{
+			int r = name_without_id(cases[c][0], out, sizeof out), ok = cases[c][1] ? r && !strcmp(out, cases[c][1]) : !r;
+
+			printf("%s  %-36s -> %s\n", ok ? "PASS" : "FAIL", cases[c][0], r ? out : "(kept)");
+			bad += !ok;
+		}
+		/* the lists with the setting on: a card game named the OPL way shows its title alone */
+		ui_names_clean = 1;
+		add(P_PS2, "SLUS_213.59.Bully.iso", "", 4000000000ULL, 0)->where = 1;
+		ui_prepare();
+		for (c = 0; c < (unsigned)n_games[P_PS2]; c++)
+			if (!strcmp(games[P_PS2][c].name, "SLUS_213.59.Bully.iso"))
+				break;
+		bad += c == (unsigned)n_games[P_PS2] || strcmp(games[P_PS2][c].shown, "Bully");
+		printf("%s  the PS2 list shows \"%s\" for SLUS_213.59.Bully.iso\n",
+			c < (unsigned)n_games[P_PS2] && !strcmp(games[P_PS2][c].shown, "Bully") ? "PASS" : "FAIL",
+			c < (unsigned)n_games[P_PS2] ? games[P_PS2][c].shown : "(not listed)");
+		ui_names_clean = 0;
+		ui_prepare();
+		printf("---- %s\n", bad ? "FAILED" : "all passed");
+		return bad ? 1 : 0;
+	}
+	if (getenv("PRISM_RENDER_DISC"))
+	{
+		/* v0.82: the disc in the drive drawn as a disc (screens.c disc_jacket); not one of the showcase pictures */
+		for (k = 0; k < n_games[P_PS3]; k++)
+			games[P_PS3][k].kind = 4;
+		add(P_PS3, "Another PS3 Game.iso", "BLUS30000", 4000000000ULL, 0)->where = 2;
+		ui_prepare();
+		ui_pad(PAD_CIRCLE, 0);
+		ui_pad(PAD_CIRCLE, 0);
+		ui_home_go(3);
+		ui_pad(PAD_CROSS, 0);
+		shot("11_ps3_disc_in_drive", 1100);
+		ui_pad(PAD_RIGHT, 0);
+		shot("12_ps3_disc_not_selected", 1200);
+	}
 	return 0;
 }
 

@@ -5,4 +5,9 @@
 int ps3sd_card_game(const void *g);
 /* the game's ISO checked on the card, its sector list written, mounted by webMAN, /dev_bdvd checked. 0, or -1 (why) */
 int ps3sd_prepare(const void *g, char *why, int wn);
+/* at Prism's start, before any card is read: the card game webMAN still serves from the last start is unmounted */
+void ps3sd_release(void);
+/* v0.82 / 1.00: a PS1 image on an exFAT volume (a card's or a USB drive's): served by rawseciso in its CD mode */
+int ps1sd_card_game(const void *g);
+int ps1sd_prepare(const void *g, char *why, int wn);
 #endif

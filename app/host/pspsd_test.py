@@ -217,13 +217,17 @@ def main():
     if run_checks():
         return 1
     code = open(core).read()
+    # v0.82: pspsd_core.c also holds ps3_args (tested by host/ps3sd_test.py), which repeats two of these lines: the
+    # PSP plants go into the PSP half only (everything before ps3_args)
+    cut = code.find("\nint ps3_args(")
+    head, tail = (code[:cut], code[cut:]) if cut >= 0 else (code, "")
     caught = 0
     for name, a, b in MUTANTS:
-        if code.count(a) != 1:
+        if head.count(a) != 1:
             print("FAIL  planted bug %s: the line to change is not there exactly once" % name)
             continue
         mp = W + "/pspsd_core_mut.c"
-        open(mp, "w").write(code.replace(a, b))
+        open(mp, "w").write(head.replace(a, b) + tail)
         if build(mp):
             print("FAIL  planted bug %s: does not build (a broken run, not a catch)" % name)
             continue

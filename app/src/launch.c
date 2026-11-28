@@ -344,6 +344,11 @@ int psp_launcher_for(const game_t *g)
 		want = pl_read("default");
 	if (!want)
 		want = PSPL_MINIS_;
+	/* 1.00: PPSSPP reads only what GameOS can (pps_link): never a card's or USB drive's exFAT part. Such a game starts
+	 * with a PSP launcher from its own sectors (pspsd.c). 11-27: an "exFAT" PSP test went to PPSSPP, which played the
+	 * FAT32 copy of the same name. */
+	if (g && g->exfat && want == PSPL_PPSSPP && (have & (PSPL_MINIS_ | PSPL_REMASTER)))
+		want = PSPL_MINIS_;
 	return (have & want) ? want : have & PSPL_MINIS_ ? PSPL_MINIS_ : have & PSPL_REMASTER ? PSPL_REMASTER : 0;
 }
 
@@ -471,6 +476,12 @@ static int pps_link(const game_t *g, char *why, int why_n)
 	for (i = 0; i < 4; i++)
 		if (!strncmp(g->path, ok_at[i], strlen(ok_at[i])))
 			reach = 1;
+	if (g->exfat)
+	{
+		/* 1.00: the same path names the FAT32 part to GameOS: PPSSPP would play a file of that name there, or nothing */
+		snprintf(why, why_n, "PPSSPP cannot read a card's or USB drive's exFAT part: it starts with the PSP Launcher (install one), or copy it to the FAT32 part");
+		return -45;
+	}
 	if (!reach || g->where == 1)
 	{
 		snprintf(why, why_n, "PPSSPP can play it from the hard disk, a USB drive or a card's first (FAT32) part only. Copy it to one of those (Square)");
@@ -880,7 +891,8 @@ int launch_prepare(int plat, const game_t *g, spawn_t *sp, char *why, int why_n)
 			snprintf(why, why_n, "%s is missing", PS1EMU);
 			return -40;
 		}
-		r = mount(g->path, why, why_n);
+		/* v0.82 / 1.00: a PS1 image on an exFAT volume is served from the device's sectors (ps3sd.c ps1sd_prepare) */
+		r = ps1sd_card_game(g) ? ps1sd_prepare(g, why, why_n) : mount(g->path, why, why_n);
 		if (r)
 			return r;
 		ps1_args(sp);

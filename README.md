@@ -79,6 +79,8 @@ same author. It is included as a ready-made disc image.
 
 GPL-3.0: see [LICENSE](LICENSE). Whose work Prism stands on: [NOTICE.md](NOTICE.md).
 
+Thank you to the testers who got Prism working on more consoles: [THANKS.md](THANKS.md).
+
 Prism is not made, approved or supported by Sony. It contains no Sony artwork, logos or sounds.
 Copy only discs you own, for your own use, where your law allows it.
 

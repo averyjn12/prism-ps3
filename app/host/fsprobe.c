@@ -2,6 +2,7 @@
  *   fsprobe <image> list         every game: name<TAB>sectors
  *   fsprobe <image> cat <path>   the file's bytes to stdout (lr_fs_open: whole, split, /PS2PRISM)
  *   fsprobe <image> catn <k>     game k of the list to stdout
+ *   fsprobe <image> catx <path>  1.00: as cat, from the exFAT part(s) only (lr_fs_open_exfat; built with -DLR_APP)
  * The reader's own log goes to stderr. */
 #include <stdio.h>
 #include <stdlib.h>
@@ -9,6 +10,7 @@
 #include "fsport.h"
 
 int fsport_attach_file(const char *path);
+int lr_fs_open_exfat(const char *path, u64 *size);	/* lr_fs.c, LR_APP */
 
 static int dump(u64 size)
 {
@@ -52,6 +54,8 @@ int main(int argc, char **argv)
 	}
 	if (!strcmp(argv[2], "cat") && argc > 3)
 		return lr_fs_open(argv[3], &size) ? 1 : dump(size);
+	if (!strcmp(argv[2], "catx") && argc > 3)
+		return lr_fs_open_exfat(argv[3], &size) ? 1 : dump(size);
 	if (!strcmp(argv[2], "catn") && argc > 3)
 	{
 		n = lr_fs_list();

@@ -62,6 +62,9 @@ void ui_ask_delete_many(int n, const char *what);	/* v0.75 */
 int  ui_marked(void *out, int max);	/* v0.67: copies of the marked games of this list (game_t out[max]); the count */
 void ui_say(const char *s);
 void progress(const void *g, const char *head, const char *title, float done, const char *what);
+void progress_draw(const void *g, const char *head, const char *title, float done, const char *what);	/* 1.00: busy.c */
+extern int ui_names_clean;	/* 1.00: Settings "Game names: clean" (setup.c names_clean); ui_prepare uses it */
+int name_without_id(const char *in, char *out, int n);
 
 void ui_ask_delete(const char *what);	/* main.c, after game_del_plan(): the first of the two questions */
 void ui_open_settings(void);

@@ -17,6 +17,7 @@
 #include "rip.h"
 #include "check.h"
 #include "setup.h"
+#include "ps3sd.h"	/* v0.82 */
 #include "manage.h"
 #include "version.h"
 #include "look.h"
@@ -30,6 +31,7 @@
 #include "sfx.h"	/* v0.72 */
 #include "pad.h"	/* v0.72 */
 #include "logcopy.h"	/* v0.81 */
+#include "busy.h"	/* 1.00 */
 
 #define TB_HZ		79800000ULL
 
@@ -214,7 +216,8 @@ static int start(const game_t *g)
 		ui_say(msg);
 		return 0;
 	}
-	if (plat == P_PSP && WHERE_SLOT(g->where) && psp_launcher_for(g) != PSPL_PPSSPP)	/* v0.69: PPSSPP reads no card; launch_prepare says so */
+	if (plat == P_PSP && (WHERE_SLOT(g->where) || (g->exfat && g->where >= 3 && g->where <= 10))
+	    && psp_launcher_for(g) != PSPL_PPSSPP)	/* v0.69: PPSSPP reads no card; launch_prepare says so. v0.82: exFAT USB too */
 	{
 		/* v0.30: the PSP launcher does not run a game from the card slot (Bananafuzzbuddy, 11-23): play it
 		 * from a copy on the hard disk (rip.c psp_card_copy; kept for the next start).
@@ -227,7 +230,7 @@ static int start(const game_t *g)
 		progress(g, "STARTING", g->shown, 0.2f, "Reading the game on the card");
 		if (pspsd_prepare(g, copy.path, sizeof copy.path, pwhy, sizeof pwhy) == 0)
 			g = &copy;
-		else if (!strstr(pwhy, "plain .iso"))
+		else if (g->exfat || !strstr(pwhy, "plain .iso"))	/* v0.82: an exFAT volume's game has no system file to copy */
 		{
 			/* v0.64: the card route failed where it should work: say so, copy nothing (Bananafuzzbuddy 11-24: a CF game
 			 * started a hard-disk copy instead). Only a .cso, which the card route cannot serve, still copies. */
@@ -350,6 +353,17 @@ int main(int argc, const char *argv[])
 	}
 	if (gfx_init() != 0)
 		return 1;
+	{
+		/* 1.00: the loading screens keep moving while Prism waits (busy.c) */
+		int bz = busy_init();
+		FILE *f = fopen("/dev_hdd0/tmp/prism_gfx.log", "a");
+
+		if (f)
+		{
+			fprintf(f, "busy ticker: %d (0 = on; -1 = the CPU draws)\n", bz);
+			fclose(f);
+		}
+	}
 	launch_disarm();
 	launch_cancel();
 	{
@@ -449,11 +463,20 @@ int main(int argc, const char *argv[])
 	check_console();
 	autostart_started();	/* v0.29: before setup_read, it may rewrite onxmb.bat */
 	setup_read();
+	{
+		/* v0.82: an update's new PS2 helper replaces the installed one (setup.c setup_refresh) */
+		char rm[200];
+
+		if (setup_refresh(rm, sizeof rm) != 0)
+			ui_say(rm);
+	}
+	ps3sd_release();	/* v0.82: before games_scan reads the cards (ps3sd.c) */
 	tinytees_install();
 	art_load();
 	tinytees_cover();	/* v0.59: loads the art file again itself if it added the cover */
 	pps_links_clean();	/* v0.72: PPSSPP's empty stand-in files, once the console has restarted (launch.h) */
 	played_load();		/* v0.67: before the first ui_prepare(), which looks for the game to continue */
+	ui_names_clean = names_clean();	/* 1.00: Settings "Game names: clean" */
 	wall0 = wall_s();
 	wall0_tb = tb();
 	ui_now_s = wall0;

@@ -69,6 +69,11 @@ static u32 label_v = 1;
 #define GFX_LOG		"/dev_hdd0/tmp/prism_gfx.log"
 
 int gfx_dead;
+/* 1.00: busy.c may draw the loading screen from its own thread while the app waits; every way into the drawing
+ * below first takes the drawing back from it (GX_TAKE), which waits out its frame */
+volatile int gx_lent;
+void (*gx_take_back)(void);
+#define GX_TAKE()	do { if (gx_lent && gx_take_back) gx_take_back(); } while (0)
 static gcmContextData ctx0;		/* the context as rsxInit left it */
 static u32 cb_start = 0xFFFFFFFF;	/* the offset of its "current" then; all ones = not known: no rewind */
 static unsigned glog_lines, n_present, cb_max;
@@ -435,6 +440,7 @@ gxv_t *gx_prims(const void *px, int w, int h, int n)
 	texent *e = &font_ent;
 	gxv_t *p;
 
+	GX_TAKE();
 	if (clip_empty || n <= 0)
 		return NULL;
 	if (px)
@@ -464,6 +470,7 @@ gxv_t *gx_prims(const void *px, int w, int h, int n)
 
 void gx_clear(u32 rgb)
 {
+	GX_TAKE();
 	gx_flush();
 	rsxSetScissor(ctx, 0, 0, dw, dh);
 	rsxSetClearColor(ctx, rgb & 0xFFFFFF);
@@ -475,6 +482,7 @@ void gx_clear(u32 rgb)
  * the clear and the test are rsxtest's own calls (PSL1GHT samples/graphics/rsxtest main.cpp drawFrame). */
 void gx_depth(int on)
 {
+	GX_TAKE();
 	gx_flush();
 	if (on)
 	{
@@ -490,6 +498,7 @@ void gx_depth(int on)
 
 void gx_scissor(int x0, int y0, int x1, int y1)
 {
+	GX_TAKE();
 	if (x0 < 0) x0 = 0;
 	if (y0 < 0) y0 = 0;
 	if (x1 > CW) x1 = CW;
@@ -511,6 +520,7 @@ void gx_font(const unsigned char *cov)
 {
 	int i;
 
+	GX_TAKE();
 	if (!gfx_gpu)
 		return;
 	for (i = 0; i < GX_FONT_W * GX_FONT_H; i++)
@@ -523,6 +533,7 @@ void gx_tex_forget(void)
 {
 	int i;
 
+	GX_TAKE();
 	/* the slots keep their age: one drawn a frame ago may still be read by what is queued */
 	for (i = 0; i < TEX_SLOTS; i++)
 		texs[i].px = NULL;
@@ -642,6 +653,7 @@ int gx_dump(const char *path)
 	FILE *f;
 	int i;
 
+	GX_TAKE();
 	if (!gfx_gpu)
 		return -1;
 	wait_label();		/* everything queued is drawn, and the flip before it has happened */
@@ -740,6 +752,7 @@ int gfx_init(void)
 
 void gfx_present(void)
 {
+	GX_TAKE();
 	if (gfx_dead)
 		return;
 	if (gfx_gpu)
@@ -782,6 +795,7 @@ void gfx_end(void)
 {
 	int i;
 
+	GX_TAKE();
 	if (!ctx)
 		return;
 	glog("closing: frames shown, most command bytes in one frame, stuck", (long)n_present, (long)cb_max, (long)gfx_dead);

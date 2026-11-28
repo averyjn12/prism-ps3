@@ -89,7 +89,7 @@ for f in ("build.sh", "port_tree.sh", "apply_prism.py", "out/lr_g5.bin", "out/lr
 # the PS2-side launcher image's source
 count += copy_tree("launcher/ui", keep=lambda f: want_source(f) or f.endswith((".ttf", ".png")))
 # the front page and the papers
-for src, dst in (("app/repo/README.md", "README.md"), ("app/LICENSE", "LICENSE"), ("app/NOTICE.md", "NOTICE.md"),
+for src, dst in (("app/repo/README.md", "README.md"), ("app/repo/THANKS.md", "THANKS.md"), ("app/LICENSE", "LICENSE"), ("app/NOTICE.md", "NOTICE.md"),
                  ("app/TERMS.md", "TERMS.md"), ("app/INSTALL.md", "INSTALL.md")):
     copy_file(src, dst)
     count += 1

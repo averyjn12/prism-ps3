@@ -19,7 +19,7 @@
 /* v0.55: the card's PS2 games in webMAN's list, right under the setup it needs; v0.57: Game covers */
 /* v0.61: the PSP launcher games start with (launch.c psp_launcher_*) */
 /* v0.80: ACT_PPSD, whether PPSSPP starts the game at once (launch.h PPS_BOOT_FILE) or opens its own list */
-enum { ACT_HELP, ACT_SETUP, ACT_WMSC, ACT_COVERS, ACT_PSPL, ACT_PPSD, ACT_SOUND, ACT_RECHECK, ACT_PROBE, ACT_WMFIX, N_ACT };	/* v0.73: ACT_SOUND */
+enum { ACT_HELP, ACT_SETUP, ACT_WMSC, ACT_COVERS, ACT_PSPL, ACT_PPSD, ACT_SOUND, ACT_NAMES, ACT_RECHECK, ACT_PROBE, ACT_WMFIX, N_ACT };	/* v0.73: ACT_SOUND; 1.00: ACT_NAMES */
 
 static int st_covers;	/* v0.57: the Game covers page is up (covers.c) */
 
@@ -59,7 +59,7 @@ static void pl_refresh(void)
 unsigned settings_nav_sig(void)	/* v0.72: screens.h */
 {
 	return (unsigned)(st_sel * 64 + st_ask * 8 + st_yes * 4 + st_help * 2 + st_covers) + help_nav_sig() * 1024u + (unsigned)pl_now * 65536u
-		+ (unsigned)menu_sounds_on() * 524288u + (unsigned)pp_on * 1048576u;
+		+ (unsigned)menu_sounds_on() * 524288u + (unsigned)pp_on * 1048576u + (unsigned)ui_names_clean * 2097152u;
 }
 
 void settings_open(void)
@@ -208,6 +208,7 @@ void settings_draw(void)
 			: i == ACT_WMFIX ? "Turn webMAN's Auto-Play off" : i == ACT_WMSC ? "Put PS2 games in webMAN's list"
 			: i == ACT_COVERS ? "Game covers"
 			: i == ACT_SOUND ? (menu_sounds_on() ? "Menu sounds: on" : "Menu sounds: off")
+			: i == ACT_NAMES ? (ui_names_clean ? "Game names: clean (no IDs, no [SDCARD])" : "Game names: as on the card")
 			: i == ACT_PPSD ? (!(pl_have & PSPL_PPSSPP) ? "PPSSPP: not installed" : !pp_on ? "PPSSPP: opens its game list first"
 				: pp_build >= PPS_DIRECT_BUILD ? "PPSSPP: starts the game outright" : "PPSSPP: start outright (needs build 314)")
 			: i == ACT_PSPL ? (pl == PSPL_REMASTER ? "PSP games start with: Remaster launcher" : pl == PSPL_PPSSPP ? "PSP games start with: PPSSPP"
@@ -423,6 +424,28 @@ int settings_pad(unsigned pressed)
 				ui_say(on ? "Menu sounds are on." : "Menu sounds are off. The opening keeps its sound.");
 			else
 				ui_say("Could not save the setting: it holds until Prism closes.");
+			return DO_NOTHING;
+		}
+		if (st_sel == ACT_NAMES)
+		{
+			/* 1.00: the lists' names now; webMAN's card shortcuts renamed (and moved out of SDCARD) to match */
+			int was = ui_names_clean;
+			char m[220];
+
+			if (names_clean_set(!was) != 0)
+			{
+				ui_say("Could not save the setting.");
+				return DO_NOTHING;
+			}
+			ui_names_clean = !was;
+			ui_prepare();
+			m[0] = 0;
+			wm_shortcuts_restyle(was, m, sizeof m);
+			if (m[0])
+				ui_say(m);
+			else
+				ui_say(!was ? "Game names without title IDs; webMAN's card games without [SDCARD]."
+					: "Game names as on the card; webMAN's card games in its SDCARD folder.");
 			return DO_NOTHING;
 		}
 		if (st_sel == ACT_COVERS)

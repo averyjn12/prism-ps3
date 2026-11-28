@@ -43,7 +43,13 @@ CFLAGS += -DPRISM_LR=$(LR_GATE) -I../prism -fno-delete-null-pointer-checks
 # 2026-11-24 (A01 kit): no alignment padding - layout only; -Os ICEs gcc 13 (port_tree.sh #3)
 CFLAGS += -falign-functions=4 -falign-jumps=4 -falign-loops=4 -falign-labels=4
 OBJS += ../prism/lr_main.o ../prism/lr_log.o ../prism/lr_probe.o
+ifeq ($(LR_OPL),1)
+# OPL for Prism (lr/opl/DESIGN.md): the card window instead of the file system and card layer
+CFLAGS += -DLR_OPL=1
+OBJS += ../prism/lr_hc.o ../prism/lr_usb.o ../prism/lr_opl.o
+else
 OBJS += ../prism/lr_hc.o ../prism/lr_usb.o ../prism/lr_fs.o ../prism/lr_card.o
+endif
 endif
 
 all: $(OUTPUT)

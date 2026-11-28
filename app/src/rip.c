@@ -690,8 +690,10 @@ static void draw_pick(int sel, int asking, int yes)
 		{
 			if (ok)
 				snprintf(ln, sizeof ln, "%s free", a);
+			else if (!strncmp(exf_why[EXF_SLOT(i)], "the card's exFAT part has ", 26))
+				snprintf(ln, sizeof ln, "%s free  " "\x7f" "  not enough room", a);	/* v0.82: as the other rows say it */
 			else
-				fit(ln, sizeof ln, F_SMALL, exf_why[EXF_SLOT(i)], 330);
+				snprintf(ln, sizeof ln, "%s", exf_why[EXF_SLOT(i)]);
 		}
 		else if (ps2_img && i >= 2 && i <= 9 && ok)
 			snprintf(ln, sizeof ln, "%s free  " "\x7f" "  to keep it, not to play from", a);	/* v0.78 */
@@ -699,7 +701,16 @@ static void draw_pick(int sel, int asking, int yes)
 			snprintf(ln, sizeof ln, ok ? "%s free" : "%s free  " "\x7f" "  not enough room", a);
 		else
 			snprintf(ln, sizeof ln, "a file is over 4 GB: FAT32 cannot hold it");
-		text_ex(F_SMALL, RIGHT - 12 - text_w(F_SMALL, ln, 1), y + 3, 1.0f, 1, ok ? DIM : FAINT, ln);
+		{
+			/* v0.82 (Bananafuzzbuddy 11-27: "there are a lot of words behind it overlapping"): the right-hand text gets only the
+			 * room the device's name leaves ("Memory Stick, exFAT part" is long), cut with "..." past that */
+			char cut[200];
+			int room = (int)(RIGHT - 12) - (LEFT + 12 + text_w(F_BODY, devs[i].name, 1)) - 24;
+
+			room -= (int)strlen(ln);	/* fit() measures with no tracking; the line is drawn with 1 */
+			fit(cut, sizeof cut, F_SMALL, ln, room > 60 ? room : 60);
+			text_ex(F_SMALL, RIGHT - 12 - text_w(F_SMALL, cut, 1), y + 3, 1.0f, 1, ok ? DIM : FAINT, cut);
+		}
 		y += 30;
 	}
 	legend_line();
@@ -791,7 +802,9 @@ static void scan_devs(void)
 				devs[i].present = 1;	/* listed, with that reason, not usable (exf_ok 0) */
 				continue;
 			}
-			if (strcmp(dest_sub, "PS2ISO") && !(!strcmp(dest_sub, "PS3ISO") && nfiles == 1))
+			/* 1.00: a PSP ISO (one file) and a PS1 image (with its .cue: two) play from exFAT too (ps3sd.c, pspsd.c) */
+			if (strcmp(dest_sub, "PS2ISO") && !((!strcmp(dest_sub, "PS3ISO") || !strcmp(dest_sub, "PSPISO")) && nfiles == 1)
+			    && !(!strcmp(dest_sub, "PSXISO") && nfiles >= 1 && nfiles <= 2))
 				continue;
 			card_dev = slot_storage(s);
 			if (exc_open(&dv, why_s, 160))
@@ -801,13 +814,13 @@ static void scan_devs(void)
 				continue;
 			}
 			*ok_s = exw_begin(&dv, dest_sub, dest_name, exf_need ? exf_need : total, why_s, 160) == 0;
-			if (!*ok_s && !strcmp(dest_sub, "PS3ISO") && !strcmp(why_s, "the folder is not on the card's exFAT part"))
+			if (!*ok_s && strcmp(dest_sub, "PS2ISO") && !strcmp(why_s, "the folder is not on the card's exFAT part"))
 			{
 				/* the card's first PS3 game: its folder, then try again (nothing else is written before the copy) */
 				char mk_why[160];
-				int mk = exw_mkdir(&dv, "PS3ISO", mk_why, sizeof mk_why);
+				int mk = exw_mkdir(&dv, dest_sub, mk_why, sizeof mk_why);
 
-				logf_("%s: made /PS3ISO: %d (%s)", devs[i].name, mk, mk ? mk_why : "ok");
+				logf_("%s: made /%s: %d (%s)", devs[i].name, dest_sub, mk, mk ? mk_why : "ok");
 				if (mk == 0)
 					*ok_s = exw_begin(&dv, dest_sub, dest_name, exf_need ? exf_need : total, why_s, 160) == 0;
 			}

@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
+#include <math.h>	/* v0.82: sqrtf, disc_jacket */
 #include "ui.h"
 #include "gfx.h"
 #include "games.h"
@@ -19,6 +20,7 @@
 #include "storage.h"	/* v0.64: ST_DEV_MS / ST_DEV_CF for the PS2 header */
 #include "cardcheck.h"	/* v0.65: a slot that gives damaged data */
 #include "played.h"	/* v0.67: Continue, and "played N times" */
+#include "busy.h"	/* 1.00: the loading screen keeps moving */
 
 #define QUERY_MAX	16
 
@@ -342,6 +344,72 @@ void disc(float cx, float cy, float ro, float ri, int al)
 	}
 }
 
+/* a ring from ri to ro (ri 0: a filled circle), 24 steps as disc() draws, colours outer / inner */
+static void ring(float cx, float cy, float ro, float ri, col_t co, col_t cin)
+{
+	int k;
+
+	for (k = 0; k < 24; k++)
+	{
+		float c0 = ucos(k), s0 = ucos(k - 6), c1 = ucos(k + 1), s1 = ucos(k - 5);
+
+		quad(cx + ro * c0, cy + ro * s0, cx + ro * c1, cy + ro * s1, cx + ri * c0, cy + ri * s0, cx + ri * c1, cy + ri * s1, co, co, cin, cin);
+	}
+}
+
+/* v0.82 (Bananafuzzbuddy, 2026-11-27: "if a physical disk is inserted it's image is a disk or at least the shape of a disk so
+ * it's easier to distinguish from everything else"): the disc in the drive (kind 4) is drawn as a disc. Its cover is
+ * the printed face, cut to a circle in vertical strips (no cover: its tint); a silver rim; the rainbow sheen; the
+ * clear hub and the hole. The selected one glows in a ring, and its title is under the hub as on a jacket. */
+static void disc_jacket(const game_t *g, float cx, float cy, float s, float a, int big)
+{
+	const unsigned char *t = tints[g->tint];
+	int al = (int)(a * 0x80), k, n = 40;
+	float R = s * 0.49f, Rl = s * 0.465f, Rh = s * 0.16f, Rc = s * 0.07f;
+
+	if (al <= 0)
+		return;
+	if (big)
+	{
+		float o = 6.0f, h = 22.0f;
+
+		ring(cx, cy, R + o + h, R + o, RGBA(0x7F, 0xE3, 0xFF, 0x00), RGBA(0x7F, 0xE3, 0xFF, 0x26));
+		ring(cx, cy, R + o + 2.0f, R + o, GLOW, GLOW);
+	}
+	for (k = 0; k < n; k++)
+	{
+		float xa = cx - Rl + 2.0f * Rl * k / n, xb = cx - Rl + 2.0f * Rl * (k + 1) / n, xm = (xa + xb) * 0.5f - cx;
+		float hh = Rl * Rl - xm * xm, h;
+
+		if (hh <= 0.0f)
+			continue;
+		h = sqrtf(hh);
+		if (g->cover)
+		{
+			float ua = 0.5f + 127.0f * (xa - (cx - Rl)) / (2.0f * Rl), ub = 0.5f + 127.0f * (xb - (cx - Rl)) / (2.0f * Rl);
+			float va = 0.5f + 127.0f * (Rl - h) / (2.0f * Rl), vb = 0.5f + 127.0f * (Rl + h) / (2.0f * Rl);
+
+			sprite_tex(g->cover, xa, cy - h, ua, va, xb, cy + h, ub, vb, RGBA(0x80, 0x80, 0x80, al));
+		}
+		else
+			quad(xa, cy - h, xb, cy - h, xa, cy + h, xb, cy + h, RGBA(t[0], t[1], t[2], al), RGBA(t[0], t[1], t[2], al),
+				RGBA(t[3], t[4], t[5], al), RGBA(t[3], t[4], t[5], al));
+	}
+	ring(cx, cy, R, Rl, RGBA(0x9A, 0xA0, 0xB0, al), RGBA(0xE2, 0xE6, 0xF0, al));	/* the silver rim */
+	disc(cx, cy, Rl, Rh, al / 2);							/* the sheen over the face */
+	ring(cx, cy, Rh, Rc, RGBA(0xDA, 0xE2, 0xF2, al * 0x50 / 0x80), RGBA(0xF4, 0xF7, 0xFF, al * 0x70 / 0x80));	/* the hub */
+	ring(cx, cy, Rc, 0.0f, RGBA(0x05, 0x08, 0x14, al), RGBA(0x05, 0x08, 0x14, al));	/* the hole */
+	if (!g->cover)
+		text_ex(F_HEAD, (int)(cx - s * 0.2f), (int)(cy - s * 0.36f), s / 150.0f * 1.6f, 0, RGBA(0xFF, 0xFF, 0xFF, al * 0x6C / 0x80), g->init);
+	if (big && !g->cover)	/* as on a jacket: only a disc with no cover carries its title on it */
+	{
+		char ln[100];
+
+		fit(ln, sizeof ln, F_SMALL, g->shown, (int)(s * 0.8f));
+		text_ex(F_SMALL, (int)(cx - text_w(F_SMALL, ln, 1) / 2), (int)(cy + Rh + 6.0f), 1.0f, 1, INK, ln);
+	}
+}
+
 static void jacket(const game_t *g, float cx, float cy, float s, float a, int big)
 {
 	const unsigned char *t = tints[g->tint];
@@ -350,6 +418,11 @@ static void jacket(const game_t *g, float cx, float cy, float s, float a, int bi
 	col_t ca = RGBA(t[0], t[1], t[2], al), cb = RGBA(t[3], t[4], t[5], al);
 	col_t cm = RGBA((t[0] + t[3]) / 2, (t[1] + t[4]) / 2, (t[2] + t[5]) / 2, al);
 
+	if (g->kind == 4)
+	{
+		disc_jacket(g, cx, cy, s, a, big);	/* v0.82: the disc in the drive looks like a disc */
+		return;
+	}
 	if (al <= 0)
 		return;
 	if (big)
@@ -405,6 +478,8 @@ static void mirror(const game_t *g, float cx, float y, float s, float a)
 	float x0 = cx - s / 2, x1 = x0 + s, h = s * 0.22f;
 	int al = (int)(a * 0x80 * 0.3f);
 
+	if (g->kind == 4)
+		return;		/* v0.82: a disc is round: no square reflection under it */
 	if (g->cover)
 		sprite_tex(g->cover, x0, y, 0.5f, 127.5f, x1, y + h, 127.5f, 128.0f * 0.78f, RGBA(0x80, 0x80, 0x80, al));
 	else
@@ -933,11 +1008,38 @@ void draw_message(const char *head, const char *l1, const char *l2, const char *
 	legend_item(x, IC_CIRCLE, NULL, "Menu");
 }
 
+/* 1.00: progress() is the main thread's; busy.c's thread redraws the same screen from a copy while the app waits
+ * (progress_draw), so the background keeps moving (Bananafuzzbuddy, 11-27: "so I know I'm not frozen") */
 void progress(const void *gv, const char *head, const char *title, float done, const char *what)
+{
+	busy_save(gv, head, title, done, what);
+	progress_draw(gv, head, title, done, what);
+	busy_lend();
+}
+
+void progress_draw(const void *gv, const char *head, const char *title, float done, const char *what)
 {
 	const game_t *g = (const game_t *)gv;
 	char ln[100];
+	static u64 t_prev;
+	static unsigned f_prev;
 
+	/* the background's clock on real time: the main loop counts frames, and a loading screen is drawn between
+	 * waits, so it would stand still. Never backwards, never twice (a copy loop also counts its frames) */
+	if (ui_clock)
+	{
+		u64 now = ui_clock();
+
+		if (t_prev && now > t_prev)
+		{
+			unsigned want = f_prev + (unsigned)((now - t_prev) * 60ULL / 79800000ULL);
+
+			if (want > frame)
+				frame = want;
+		}
+		t_prev = now;
+		f_prev = frame;
+	}
 	backdrop();
 	top_bar("PRISM");
 	if (g)
@@ -1181,6 +1283,48 @@ static int alnum(int c)
 	return (c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z');
 }
 
+/* 1.00 (Settings "Game names: clean", a Reddit request via Bananafuzzbuddy 11-28): a title ID at the front of a name -
+ * "SLUS_213.59.Bully" (OPL's naming), "SLUS-21359 Bully", "[SLUS-21359] Bully" - left out. 1 and the rest in out, or 0
+ * (no ID there, or nothing after it: "SLUS_000.76" stays as it is) */
+int ui_names_clean;
+
+int name_without_id(const char *in, char *out, int n)
+{
+	const char *p = in;
+	char close = 0;
+	int i;
+
+	if (*p == '[' || *p == '(')
+		close = *p++ == '[' ? ']' : ')';
+	for (i = 0; i < 4; i++)
+		if (p[i] < 'A' || p[i] > 'Z')
+			return 0;
+	p += 4;
+	if (*p != '_' && *p != '-' && *p != ' ')
+		return 0;
+	p++;
+	for (i = 0; i < 3; i++)
+		if (p[i] < '0' || p[i] > '9')
+			return 0;
+	p += 3;
+	if (*p == '.')
+		p++;
+	for (i = 0; i < 2; i++)
+		if (p[i] < '0' || p[i] > '9')
+			return 0;
+	p += 2;
+	if (close && *p++ != close)
+		return 0;
+	if (*p != '.' && *p != ' ' && *p != '_' && *p != '-')
+		return 0;
+	while (*p == '.' || *p == ' ' || *p == '_' || *p == '-')
+		p++;
+	if (!alnum((unsigned char)*p) && !(*p & 0x80))
+		return 0;
+	snprintf(out, n, "%s", p);
+	return 1;
+}
+
 static void describe(game_t *g)
 {
 	const unsigned char *s = (const unsigned char *)g->name;
@@ -1231,6 +1375,13 @@ static void describe(game_t *g)
 		if (ln > il + 3 && g->shown[ln - 1] == ')' && g->shown[ln - il - 2] == '(' && g->shown[ln - il - 3] == ' '
 			&& !strncmp(g->shown + ln - il - 1, g->id, il))
 			g->shown[ln - il - 3] = 0;
+	}
+	if (ui_names_clean && !title)
+	{
+		char rest[sizeof g->shown];
+
+		if (name_without_id(g->shown, rest, sizeof rest))
+			snprintf(g->shown, sizeof g->shown, "%s", rest);
 	}
 	k = sort_key(g->shown);
 	c = fold((unsigned char)k[0]);
