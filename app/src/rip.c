@@ -65,12 +65,21 @@ static dev_t_ devs[] = {
 	{ "/dev_usb004", "USB 4", 1, 0, 0 }, { "/dev_usb005", "USB 5", 1, 0, 0 },
 	{ "/dev_usb006", "USB 6", 1, 0, 0 }, { "/dev_usb007", "USB 7", 1, 0, 0 },
 	{ "/dev_ms", "Memory Stick", 1, 0, 0 }, { "/dev_cf", "CompactFlash", 1, 0, 0 },
-	{ "exfat:", "SD card, exFAT part", 0, 0, 0 },	/* v0.37: through exfat_w.c, PS2 games only */
+	/* v0.37: through exfat_w.c. v0.82: one entry per card slot, in the slots' own order (0 Memory Stick, 1 SD,
+	 * 2 CompactFlash): with cards in two slots the one entry had always meant the FIRST card read, the Memory Stick
+	 * (Bananafuzzbuddy 11-27: "the sd exfat actually has 17.6gb free but the memorystick exfat only has 1.7gb free") */
+	{ "exfat:ms", "Memory Stick, exFAT part", 0, 0, 0 },
+	{ "exfat:sd", "SD card, exFAT part", 0, 0, 0 },
+	{ "exfat:cf", "CompactFlash, exFAT part", 0, 0, 0 },
 };
 #define NDEV	((int)(sizeof devs / sizeof devs[0]))
-#define EXF	(NDEV - 1)
-static int exf_ok;		/* v0.37: the exFAT part can take this copy (exw_begin said yes) */
-static char exf_why[160];
+#define EXF0	(NDEV - 3)
+#define IS_EXF(i)	((i) >= EXF0)
+#define EXF_SLOT(i)	((i) - EXF0)
+static int exf_ok[3];		/* v0.37: that slot's exFAT part can take this copy (exw_begin said yes) */
+static char exf_why[3][160];
+static u64 exf_keep_dev;	/* v0.82: card_dev while a copy writes to another slot's exFAT part */
+static int exf_swapped;
 
 static u64 total, done, t0, t_rd, t_wr;
 static int nfiles, ndirs, nfile_at, bigfile, stop;
@@ -623,10 +632,12 @@ static int slot_dev(int i)
 
 static int usable(int i)
 {
-	if (slot_dev(i) && ps3_dest())
+	/* v0.82: a PS3 ISO under 4 GB may go to a card's FAT32 part too: ps3sd.c plays it from there (11-27, the card's
+	 * exFAT part had 1.7 GB free for a 3.3 GB game). A PS3 game FOLDER still never goes to a card slot */
+	if (slot_dev(i) && ps3_dest() && !(!strcmp(dest_sub, "PS3ISO") && !bigfile))
 		return 0;
-	if (i == EXF)
-		return devs[i].present && exf_ok && (!pick_many || devs[i].free >= total);	/* v0.67: room for the whole batch */
+	if (IS_EXF(i))
+		return devs[i].present && exf_ok[EXF_SLOT(i)] && (!pick_many || devs[i].free >= total);	/* v0.67: room for the whole batch */
 	if (i == 0 && ps2_img)		/* in parts if need be */
 		return devs[i].present && i != src_dev && devs[i].free >= total + (64u << 20);
 	return devs[i].present && i != src_dev && devs[i].free >= total + (64u << 20) && !(devs[i].fat && bigfile);
@@ -669,16 +680,18 @@ static void draw_pick(int sel, int asking, int yes)
 		fmt_size(a, sizeof a, devs[i].free);
 		if (i == src_dev)
 			snprintf(ln, sizeof ln, pick_many ? "they are here" : "it is here");
-		else if (slot_dev(i) && ps3_dest())
-			snprintf(ln, sizeof ln, "PS3 games do not start from the card slot");
+		else if (slot_dev(i) && ps3_dest() && strcmp(dest_sub, "PS3ISO"))
+			snprintf(ln, sizeof ln, "a PS3 game folder does not start from the card slot");
+		else if (slot_dev(i) && ps3_dest() && bigfile)
+			snprintf(ln, sizeof ln, "the ISO is over 4 GB: this part of the card is FAT32");
 		else if (i == 0 && ps2_img && bigfile)
 			snprintf(ln, sizeof ln, ok ? "%s free, as parts under 4 GB" : "%s free, not enough room", a);
-		else if (i == EXF)
+		else if (IS_EXF(i))
 		{
 			if (ok)
 				snprintf(ln, sizeof ln, "%s free", a);
 			else
-				fit(ln, sizeof ln, F_SMALL, exf_why, 330);
+				fit(ln, sizeof ln, F_SMALL, exf_why[EXF_SLOT(i)], 330);
 		}
 		else if (ps2_img && i >= 2 && i <= 9 && ok)
 			snprintf(ln, sizeof ln, "%s free  " "\x7f" "  to keep it, not to play from", a);	/* v0.78 */
@@ -711,13 +724,13 @@ static void draw_pick(int sel, int asking, int yes)
 		{
 			char raw[300];
 
-			if (pick_many && sel == EXF)
+			if (pick_many && IS_EXF(sel))
 				snprintf(raw, sizeof raw, "They go to the exFAT part's /%s, one after another", dest_sub);
 			else if (pick_many)
 				snprintf(raw, sizeof raw, "They go to %s/%s, one after another", devs[sel].path, sub_on(sel));
 			else if (sel == 0 && ps2_img && bigfile)
 				snprintf(raw, sizeof raw, "It goes to %s/%s/%s.0, .1 ...", devs[sel].path, sub_on(sel), dest_name);
-			else if (sel == EXF)
+			else if (IS_EXF(sel))
 				snprintf(raw, sizeof raw, "It goes to the exFAT part's /%s/%s", dest_sub, dest_name);
 			else
 				snprintf(raw, sizeof raw, "It goes to %s/%s/%s", devs[sel].path, sub_on(sel), dest_name);
@@ -748,37 +761,62 @@ static void scan_devs(void)
 		u32 bs = 0;
 		u64 fb = 0;
 
-		if (i == EXF)
+		if (IS_EXF(i))
 		{
-			/* v0.37: the card's exFAT part: listed for PS2 copies, usable when the writer has
-			 * checked the volume, the folder and the name (exw_begin) - nothing is written here */
+			/* v0.37: a card's exFAT part: listed for PS2 copies, usable when the writer has
+			 * checked the volume, the folder and the name (exw_begin) - nothing is written here.
+			 * v0.82: one entry per slot (devs[]); exc_open opens card_dev, so card_dev is that slot's for the probe */
 			exw_dev dv;
+			int s = EXF_SLOT(i);
+			u64 keep = card_dev;
+			int *ok_s = &exf_ok[s];
+			char *why_s = exf_why[s];
 
 			devs[i].present = 0;
 			devs[i].free = 0;
-			exf_ok = 0;
-			exf_why[0] = 0;
-			/* v0.65: never written unless the card was read from a slot that passed the check (cardcheck.h) */
-			if (card_state || slot_bad(slot_of_dev(card_dev)))
+			*ok_s = 0;
+			why_s[0] = 0;
+			/* v0.65: never written unless that card was read from a slot that passed the check (cardcheck.h) */
+			if (!(card_read_mask & (1 << s)) || slot_bad(s))
 			{
-				logf_("exFAT part: not offered, %s", card_state == LR_E_BADSLOT ? "the card's slot gives damaged data" : "no card read");
+				logf_("%s: not offered, %s", devs[i].name, slot_bad(s) ? "the slot gives damaged data" : "no card read there");
 				continue;
 			}
+			/* v0.82: a PS3 ISO (one file) may go there too: ps3sd.c plays it from the card (Bananafuzzbuddy 11-27: "i currently can
+			 * not transfer the ps3 games from the HDD to the SD card because it says they won't run"). A game FOLDER cannot
+			 * (it would have to be made into an ISO first) */
+			if (!strcmp(dest_sub, "GAMES"))
 			{
-				/* v0.66: with cards in several slots, the first one read (games.c card_dev); say which */
-				static char exf_name[48];
+				snprintf(why_s, 160, "a PS3 game folder plays from a card only as an ISO; Prism cannot make the ISO yet");
+				devs[i].present = 1;	/* listed, with that reason, not usable (exf_ok 0) */
+				continue;
+			}
+			if (strcmp(dest_sub, "PS2ISO") && !(!strcmp(dest_sub, "PS3ISO") && nfiles == 1))
+				continue;
+			card_dev = slot_storage(s);
+			if (exc_open(&dv, why_s, 160))
+			{
+				card_dev = keep;
+				devs[i].present = strcmp(why_s, "no exFAT volume on the card") != 0;
+				continue;
+			}
+			*ok_s = exw_begin(&dv, dest_sub, dest_name, exf_need ? exf_need : total, why_s, 160) == 0;
+			if (!*ok_s && !strcmp(dest_sub, "PS3ISO") && !strcmp(why_s, "the folder is not on the card's exFAT part"))
+			{
+				/* the card's first PS3 game: its folder, then try again (nothing else is written before the copy) */
+				char mk_why[160];
+				int mk = exw_mkdir(&dv, "PS3ISO", mk_why, sizeof mk_why);
 
-				snprintf(exf_name, sizeof exf_name, "%s card, exFAT part", slot_name(slot_of_dev(card_dev)));
-				devs[i].name = exf_name;
+				logf_("%s: made /PS3ISO: %d (%s)", devs[i].name, mk, mk ? mk_why : "ok");
+				if (mk == 0)
+					*ok_s = exw_begin(&dv, dest_sub, dest_name, exf_need ? exf_need : total, why_s, 160) == 0;
 			}
-			if (strcmp(dest_sub, "PS2ISO") || exc_open(&dv, exf_why, sizeof exf_why))
-				continue;
-			exf_ok = exw_begin(&dv, dest_sub, dest_name, exf_need ? exf_need : total, exf_why, sizeof exf_why) == 0;
 			devs[i].free = exw_free_bytes();
-			devs[i].present = exf_ok || strcmp(exf_why, "no exFAT volume on the card");
+			devs[i].present = *ok_s || strcmp(why_s, "no exFAT volume on the card");
 			exw_abort();
 			exc_close();
-			logf_("exFAT part: %s (%s), %llu MB free", exf_ok ? "usable" : "not usable", exf_why, (unsigned long long)(devs[i].free >> 20));
+			card_dev = keep;
+			logf_("%s: %s (%s), %llu MB free", devs[i].name, *ok_s ? "usable" : "not usable", why_s, (unsigned long long)(devs[i].free >> 20));
 			continue;
 		}
 		devs[i].present = is_dir(devs[i].path);
@@ -2162,8 +2200,8 @@ int copy_game(unsigned (*pad)(void), int plat, const game_t *g, char *msg, int m
 		}
 		if (!usable(d))
 		{
-			if (d == EXF && exf_why[0])
-				snprintf(msg, msg_n, "%s", exf_why);
+			if (IS_EXF(d) && exf_why[EXF_SLOT(d)][0])
+				snprintf(msg, msg_n, "%s", exf_why[EXF_SLOT(d)]);
 			else if (devs[d].fat && bigfile && !(d == 0 && ps2_img))
 				snprintf(msg, msg_n, "a file is over 4 GB: %s cannot hold it", devs[d].name);
 			else
@@ -2184,10 +2222,17 @@ int copy_game(unsigned (*pad)(void), int plat, const game_t *g, char *msg, int m
 		snprintf(msg, msg_n, "Out of memory");
 		goto out;
 	}
-	if (d != EXF)
+	if (!IS_EXF(d))
 	{
 		snprintf(dst, sizeof dst, "%s/%s", devs[d].path, sub_on(d));
 		sysFsMkdir(dst, 0777);
+	}
+	else
+	{
+		/* v0.82: copy_to_exfat / verify_exfat open card_dev: the chosen slot's card for this copy (back at out:) */
+		exf_keep_dev = card_dev;
+		exf_swapped = 1;
+		card_dev = slot_storage(EXF_SLOT(d));
 	}
 	t0 = tb();
 	show("starting");
@@ -2206,7 +2251,7 @@ int copy_game(unsigned (*pad)(void), int plat, const game_t *g, char *msg, int m
 			snprintf(dst, sizeof dst, "%s/%s/%s", devs[d].path, dest_sub, b ? b + 1 : flist[i]);
 			if (sysFsStat(flist[i], &st) != 0)
 				continue;
-			if (d == EXF)
+			if (IS_EXF(d))
 			{
 				snprintf(dest_name, sizeof dest_name, "%s", b ? b + 1 : flist[i]);
 				r = copy_to_exfat(flist[i], st.st_size);
@@ -2269,7 +2314,7 @@ int copy_game(unsigned (*pad)(void), int plat, const game_t *g, char *msg, int m
 	free(buf);
 	buf = NULL;
 	logf_("copy ended %d: %llu of %llu bytes", r, (unsigned long long)done, (unsigned long long)total);
-	if (stop && ps2_img && (d == 0 || d == EXF))
+	if (stop && ps2_img && (d == 0 || IS_EXF(d)))
 		snprintf(msg, msg_n, "Stopped: nothing kept on the card");
 	else if (stop)
 		snprintf(msg, msg_n, "Stopped: the copy on %s is only part of the game", devs[d].name);
@@ -2289,6 +2334,11 @@ int copy_game(unsigned (*pad)(void), int plat, const game_t *g, char *msg, int m
 			finish_move(plat, g, msg, msg_n);	/* v0.75 */
 	}
 out:
+	if (exf_swapped)
+	{
+		card_dev = exf_keep_dev;
+		exf_swapped = 0;
+	}
 	logf_("result: %s", msg);
 	src_dev = -1;
 	ps2_img = 0;

@@ -20,6 +20,7 @@
 #include "pspsd.h"
 #include "cardcheck.h"	/* v0.65: card_lun */
 #include "version.h"	/* v0.80: psp_table_write */
+#include "ps3sd.h"	/* v0.82: PS3 ISOs from a card slot */
 
 /* v0.54: the A01 helper (CECHA / CECHB) reads its own trigger file (lr.h LR_CFG_FILE, hwemu) */
 #define TRIGGER	(chk.a01 ? "/dev_hdd0/tmp/prism_a01.cfg" : "/dev_hdd0/tmp/prism_lr.cfg")
@@ -887,7 +888,9 @@ int launch_prepare(int plat, const game_t *g, spawn_t *sp, char *why, int why_n)
 	}
 	if (plat == P_PS3)
 	{
-		r = mount(g->path, why, why_n);
+		/* v0.82: an ISO in a card slot is served from the card's raw sectors by webMAN's rawseciso (ps3sd.c): a game
+		 * cannot open the card itself (v0.22), and GameOS does not see the card's exFAT part */
+		r = ps3sd_card_game(g) ? ps3sd_prepare(g, why, why_n) : mount(g->path, why, why_n);
 		if (r)
 			return r;
 		for (i = 0; i < 50 && sysFsStat(PS3BOOT, &st) != 0; i++)
@@ -903,11 +906,32 @@ int launch_prepare(int plat, const game_t *g, spawn_t *sp, char *why, int why_n)
 		 * psx-place "Improving direct boot feature"). The app leaves webMAN a one-shot request
 		 * (v0.21: wait for the XMB, 2 s, then webMAN presses X on the disc icon), makes webMAN read it, and
 		 * quits.
-		 * v0.27: the XMB's own game exec first (disc_exec); webMAN's press only if it refuses. */
-		if (disc_exec(g) == 0)
+		 * v0.27: the XMB's own game exec first (disc_exec); webMAN's press only if it refuses.
+		 * v0.82: with the title ID read from the disc itself when the list had none (an ISO's: the card's exFAT
+		 * part, the hard disk's PS3ISO). cellGameExecGame(1, "") was refused (8002cb04) for Borderlands from the
+		 * card on 11-27, and webMAN's press after the app quit found the face over the XMB */
 		{
-			sp->self[0] = 0;
-			return 0;
+			game_t gg = *g;
+
+			if (!gg.id[0])
+			{
+				static u8 sfo[8192];
+				s32 fd;
+				u64 got = 0;
+
+				if (sysFsOpen("/dev_bdvd/PS3_GAME/PARAM.SFO", SYS_O_RDONLY, &fd, NULL, 0) == 0)
+				{
+					sysFsRead(fd, sfo, sizeof sfo, &got);
+					sysFsClose(fd);
+					if (got)
+						sfo_get(sfo, (int)got, "TITLE_ID", gg.id, sizeof gg.id);
+				}
+			}
+			if (disc_exec(&gg) == 0)
+			{
+				sp->self[0] = 0;
+				return 0;
+			}
 		}
 		r = request_play(g->path);
 		if (r)

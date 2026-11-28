@@ -66,11 +66,13 @@ WANT="$(cat "$HERE/../out/lr_g5.tested")"
 HAVE="$(sha256sum "$HERE/../out/lr_g5.bin" | cut -c1-64)"
 if [ "$WANT" != "$HAVE" ]; then echo "lr_g5.bin is not the tested build ($HAVE vs $WANT)"; exit 1; fi
 cp "$HERE/../out/lr_g5.bin" "$B/pkg/USRDIR/setup/prism_stage2.bin"
-# v0.54: the A01 helper (CECHA / CECHB, ps2_emu): only the build the A01 scenario suite passed
-WANT_A="$(cat "$HERE/../out/lr_hw5k11.tested")"
-HAVE_A="$(sha256sum "$HERE/../out/lr_hw5k11.bin" | cut -c1-64)"
-if [ "$WANT_A" != "$HAVE_A" ]; then echo "lr_hw5k11.bin is not the tested build ($HAVE_A vs $WANT_A)"; exit 1; fi
-cp "$HERE/../out/lr_hw5k11.bin" "$B/pkg/USRDIR/setup/prism_stage2_a01.bin"
+# v0.54: the A01 helper (CECHA / CECHB, ps2_emu): only the build the A01 scenario suite passed.
+# v0.82: lr_hw5a (2026-11-27-a01a, from a CECHA01 tester's 0.81 logs: a USB device answering at address 127;
+# lr/re_notes/a01_first_log_2026-11-27.md; A01 suite 88 scenarios, 0 failed) in place of lr_hw5k11
+WANT_A="$(cat "$HERE/../out/lr_hw5a.tested")"
+HAVE_A="$(sha256sum "$HERE/../out/lr_hw5a.bin" | cut -c1-64)"
+if [ "$WANT_A" != "$HAVE_A" ]; then echo "lr_hw5a.bin is not the tested build ($HAVE_A vs $WANT_A)"; exit 1; fi
+cp "$HERE/../out/lr_hw5a.bin" "$B/pkg/USRDIR/setup/prism_stage2_a01.bin"
 # v0.55: the two webMAN shortcut templates (setup.c wm_shortcuts_add) = bench/lr_title.py build_template
 python3 "$HERE/../app_a01/tools/mk_templates.py" "$B/pkg/USRDIR/setup"
 for t in tpl_dvd.iso tpl_cd.iso; do

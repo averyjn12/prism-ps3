@@ -226,6 +226,8 @@ static int bring_up(int first)
 	return lr_msc_select(first ? cfg.lun : lr_lun, first == 1 ? LR_MSC_WAIT_FIRST : LR_MSC_WAIT_AGAIN);
 }
 
+#if !defined(PS2HWEMU)	/* A01 2026-11-27: the 32 MB timed read (mode=msc) is the old field kit's step 2 only; the
+ * kit carries its own helper, and the room it took holds set_addr() (lr_usb.c) */
 static void bench(void)
 {
 	u8 *s = lr_dma + LR_OFF_DATA;
@@ -263,6 +265,7 @@ static void bench(void)
 
 	lr_log("g4: PASS %d KB in %d ms = %d KB/s\n", (int)(total / 2), (int)dt, (int)((u64)(total / 2) * 1000 / dt));
 }
+#endif
 
 /* gxemu/main.c hands over the open hard-disk title before lr_init(). */
 void lr_carrier(int fd)
@@ -372,7 +375,9 @@ static int card_up(int first)
 
 	if (cfg.mode == MODE_MSC)
 	{
+#if !defined(PS2HWEMU)
 		bench();
+#endif
 		return 0;
 	}
 

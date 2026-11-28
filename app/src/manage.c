@@ -278,6 +278,13 @@ static int plan(int plat, const game_t *g, char *why, int n)
 		snprintf(why, n, "That is the disc (or its shortcut): nothing on a storage device to delete");
 		return -1;
 	}
+	if (plat == P_PS3 && g->exfat)
+	{
+		/* v0.82: a PS3 ISO on a card's exFAT part (games.c scan_ps3_cards): GameOS cannot see it, so none of the file
+		 * steps below would find it. Played from the card only, for now */
+		snprintf(why, n, "Not yet: a PS3 game on the card's exFAT part is only played from there. Delete or copy it on a PC");
+		return -9;
+	}
 	if (plat == P_PS2 && g->where == 2)
 	{
 		/* v0.16: a PS2 image on the hard disk (/dev_hdd0/PS2ISO), e.g. the Tiny Tees Prism brings */

@@ -85,6 +85,55 @@ static int first_descriptor(u8 *d)
 	return r;
 }
 
+#if defined(PS2HWEMU)
+/* A01, the first CECHA log (2026-11-27): SET_ADDRESS 127 went through, and the next request at
+ * 127 ended in BABBLE with ANOTHER device's descriptor in the buffer (12 01 00 02 e0 01 01 40:
+ * class e0/01/01, Bluetooth), not the reader's (class 00). So something else answers at that
+ * address on this bus. Which device, and why it answered a config request with a device
+ * descriptor, is not known. An address is now used only if (1) nothing answers there while the
+ * reader is still at 0, and (2) after SET_ADDRESS the reader's own descriptor, all 18 bytes,
+ * comes back from it. 127 first, then down to 124. Every refusal is logged. */
+static int set_addr(const u8 *d)
+{
+	u8 e[18];
+	u32 a;
+	int r;
+
+	for (a = LR_USB_ADDR; a > LR_USB_ADDR - 4; a--)
+	{
+		memset(e, 0, 8);
+		lr_hc_pipe(LR_Q_CTRL, a, 0, 64);
+		r = ctrl(0x80, 6, 0x0100, 0, e, 8);
+		if (r != LR_E_XACT || (lr_hc_tok & 0x78) != 0x48)
+		{
+			lr_log("usb: addr %d answers: %d tok %08x, %02x %02x %02x %02x %02x %02x %02x %02x\n", a, r, lr_hc_tok, e[0], e[1],
+				e[2], e[3], e[4], e[5], e[6], e[7]);
+			continue;
+		}
+
+		lr_hc_pipe(LR_Q_CTRL, 0, 0, 64);
+		r = ctrl(0x00, 5, a, 0, NULL, 0);
+		if (r)
+			return r;
+		lr_mdelay(5);		/* set-address recovery */
+		lr_hc_pipe(LR_Q_CTRL, a, 0, 64);
+		r = ctrl(0x80, 6, 0x0100, 0, e, 18);
+		if (r == 0 && !memcmp(e, d, 18))
+		{
+			lr_dev.addr = (u8)a;
+			return 0;
+		}
+		lr_log("usb: addr %d is not the reader after SET_ADDRESS: %d, %02x %02x %02x %02x %02x %02x %02x %02x\n", a, r, e[0],
+			e[1], e[2], e[3], e[4], e[5], e[6], e[7]);
+		r = lr_hc_port_reset();		/* the reader back at 0 for the next address */
+		if (r)
+			return r;
+	}
+
+	return LR_E_STATE;
+}
+#endif
+
 int lr_usb_enumerate(void)
 {
 	u8 d[18];
@@ -106,6 +155,15 @@ int lr_usb_enumerate(void)
 	lr_dev.pid = (u16)(d[10] | (d[11] << 8));
 	lr_log("usb: VID %04x PID %04x bcdUSB %02x%02x class %02x mps0 %d\n", lr_dev.vid, lr_dev.pid, d[3], d[2], d[4], d[7]);
 
+#if defined(PS2HWEMU)
+	r = set_addr(d);
+	if (r)
+	{
+		lr_log("usb: SET_ADDRESS failed %d\n", r);
+		return r;
+	}
+#define DEV_ADDR	lr_dev.addr
+#else
 	r = ctrl(0x00, 5, LR_USB_ADDR, 0, NULL, 0);
 	if (r)
 	{
@@ -115,6 +173,8 @@ int lr_usb_enumerate(void)
 	lr_mdelay(5);		/* set-address recovery */
 	lr_hc_pipe(LR_Q_CTRL, LR_USB_ADDR, 0, 64);
 	lr_dev.addr = LR_USB_ADDR;
+#define DEV_ADDR	LR_USB_ADDR
+#endif
 
 	r = ctrl(0x80, 6, 0x0200, 0, c, 9);
 	if (r || c[1] != 2)
@@ -188,8 +248,8 @@ int lr_usb_enumerate(void)
 	r = ctrl(0xA1, 0xFE, 0, lr_dev.iface, &b, 1);
 	lr_dev.maxlun = (r == 0 && b < 8) ? b : 0;
 
-	lr_hc_pipe(LR_Q_OUT, LR_USB_ADDR, lr_dev.ep_out & 15, lr_dev.mps_out);
-	lr_hc_pipe(LR_Q_IN, LR_USB_ADDR, lr_dev.ep_in & 15, lr_dev.mps_in);
+	lr_hc_pipe(LR_Q_OUT, DEV_ADDR, lr_dev.ep_out & 15, lr_dev.mps_out);
+	lr_hc_pipe(LR_Q_IN, DEV_ADDR, lr_dev.ep_in & 15, lr_dev.mps_in);
 
 	lr_log("usb: addr %d cfg %d ep in %02x/%d out %02x/%d maxlun %d (%d)\n", lr_dev.addr, lr_dev.cfg, lr_dev.ep_in,
 		lr_dev.mps_in, lr_dev.ep_out, lr_dev.mps_out, lr_dev.maxlun, r);

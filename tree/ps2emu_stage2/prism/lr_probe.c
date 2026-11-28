@@ -74,6 +74,7 @@ int lr_emu_usb_started(void)
 	return lr_usb_mapped() && *(u64 *)(u64)GX_EHCI_OPBASE_PTR != 0;
 }
 
+#if !defined(PS2HWEMU)	/* A01 2026-11-27: unused there, and its strings stayed in the 64 KB image after --gc-sections */
 /* -------------------------------------------------------------- repository */
 
 static s64 repo(u64 n1, u64 n2, u64 n3, u64 n4, u64 *v)
@@ -111,6 +112,7 @@ void lr_repo_dump(void)
 }
 
 /* ----------------------------------------------------------------- dumps */
+#endif
 
 static void dump_ehci(int n, u64 cap)
 {

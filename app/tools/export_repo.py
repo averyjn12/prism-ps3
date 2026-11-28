@@ -78,9 +78,12 @@ for f in ("app/build_app.sh", "app/README.md", "app/setup/carrier.iso", "app/set
     copy_file(f)
     count += 1
 # the PS2 helper: only what its build uses (gxemu). NOT netemu (key files), NOT ps2netemu_gen (a Sony file)
-for d in ("tree/debug", "tree/lv1", "tree/lv2", "tree/ps2emu", "tree/ps2emu_stage2/common", "tree/ps2emu_stage2/gxemu", "tree/ps2emu_stage2/prism"):
+# v0.82: and the CECHA / CECHB helper's (hwemu): its binary has been in every package since 0.54, so its source and
+# the tested binary belong here too (GPL-3.0)
+for d in ("tree/debug", "tree/lv1", "tree/lv2", "tree/ps2emu", "tree/ps2emu_stage2/common", "tree/ps2emu_stage2/gxemu",
+          "tree/ps2emu_stage2/hwemu", "tree/ps2emu_stage2/prism"):
     count += copy_tree(d)
-for f in ("build.sh", "port_tree.sh", "apply_prism.py", "out/lr_g5.bin", "out/lr_g5.tested"):
+for f in ("build.sh", "port_tree.sh", "apply_prism.py", "out/lr_g5.bin", "out/lr_g5.tested", "out/lr_hw5a.bin", "out/lr_hw5a.tested"):
     copy_file(f)
     count += 1
 # the PS2-side launcher image's source
@@ -182,7 +185,10 @@ for root, dirs, files in os.walk(repo):
             bad.append((rel, "a kind of file that is never published"))
         if low in ("keys", "rif-key", "npdrm-const", "curves", "ldr_curves", "vsh_curves"):
             bad.append((rel, "a key file"))
-        if "netemu" in rel or "hwemu" in rel:
+        # v0.82: the CECHA / CECHB helper's own folder is published (its binary ships in every package since 0.54; the
+        # same kind of files as gxemu's, Cobra's GPL source; the key-value scan below still runs on it). Any OTHER
+        # path naming hwemu, and anything netemu (key files), stays out
+        if "netemu" in rel or ("hwemu" in rel and not rel.startswith("tree/ps2emu_stage2/hwemu/")):
             bad.append((rel, "from a folder that is left out"))
         if size > 3 * 1024 * 1024:
             bad.append((rel, "over 3 MB (%d)" % size))

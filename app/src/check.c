@@ -44,7 +44,7 @@ static const struct
 } models[] = {
 	{ 0x01, 1, "CECHA / CECHB, COK-001" },
 	{ 0x02, 2, "CECHC / CECHE, COK-002" },
-	{ 0x03, 2, "CECHE, SEM-001" },
+	{ 0x03, 2, "CECHC / CECHE, SEM-001" },	/* 2026-11-27: a CECHC reads 3 too (Reddit tester; Bananafuzzbuddy's CECHE01 reads 3) */
 	{ 0x04, 3, "CECHG, DIA-001" },
 	{ 0x05, 3, "CECHH, DIA-002" },
 	{ 0x06, 3, "CECHJ / CECHK, VER-001" },

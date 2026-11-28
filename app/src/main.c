@@ -189,10 +189,11 @@ static int start(const game_t *g)
 		ui_say(msg);
 		return 0;
 	}
-	if (plat == P_PS3 && WHERE_SLOT(g->where) && g->kind < 4)
+	if (plat == P_PS3 && WHERE_SLOT(g->where) && g->kind == 3)
 	{
-		/* v0.22: black screen from the card slot (Borderlands, 2026-11-23); see rip.c ps3_dest */
-		ui_say("Not started: PS3 games do not start from a card slot. Square: copy it to the internal or a USB drive.");
+		/* v0.22: black screen from the card slot (Borderlands, 2026-11-23); see rip.c ps3_dest. v0.82: an ISO plays from
+		 * the card (ps3sd.c); a game FOLDER still cannot */
+		ui_say("Not started: a PS3 game folder does not start from a card slot. Put it on the card as an ISO.");
 		return 0;
 	}
 	if (plat == P_PS2 && g->kind < 4 && g->where >= 3 && g->where <= 10)

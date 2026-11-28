@@ -24,4 +24,12 @@ int fi_header(const char *name, uint64_t size, uint8_t *out);
 /* the .ntfs[PSPISO] bytes (big-endian, as the PS3 reads them): device, the header's path on the console,
  * and the image's runs on the device (lba, cnt in the device's own 512-byte sectors). Bytes, or -1 */
 int fi_args(uint64_t device, const char *hdr_path, const uint32_t *lba, const uint32_t *cnt, int n, uint8_t *out, int cap);
+
+/* v0.82: a PS3 game ISO on a card, played through webMAN's rawseciso (Bananafuzzbuddy 2026-11-27: "get the exfat to work for ps3
+ * games"; src/ps3sd.c). The .ntfs[PS3ISO] layout (webMAN-MOD _Projects_/prepISO/source/main.c rawseciso_args and
+ * include/prep.h, lr/re_notes/webman_rawiso_contract_2026-11-27.md): u64 device, u32 emu_mode 1 (EMU_PS3, raw mode:
+ * every section is device sectors, no header file), u32 sections, u32 tracks 0, u32 lba[n], u32 cnt[n], big-endian.
+ * Bytes (20 + 8n), or -1 */
+#define FI_EMU_PS3	1
+int ps3_args(uint64_t device, const uint32_t *lba, const uint32_t *cnt, int n, uint8_t *out, int cap);
 #endif

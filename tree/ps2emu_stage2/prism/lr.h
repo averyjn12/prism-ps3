@@ -23,7 +23,7 @@ typedef uint64_t u64;
 typedef int64_t  s64;
 
 #if defined(PS2HWEMU)
-#define LR_VERSION	"2026-11-24-a01k11"	/* A01 field kit 1.1 (app_a01/): + wide emulator check (any fw 4.84-4.93) */
+#define LR_VERSION	"2026-11-27-a01a"	/* after the first CECHA log: the reader's address is probed and verified */
 #else
 #define LR_VERSION	"2026-11-22q"
 #endif
@@ -221,6 +221,9 @@ typedef struct
 
 extern u8 *lr_dma;		/* EA of our block, NULL until lr_hc_attach() succeeded */
 extern u8 lr_swap;
+#if defined(PS2HWEMU)
+extern u32 lr_hc_tok;
+#endif
 extern lr_usbdev lr_dev;
 extern u32 lr_blk_count;	/* 512-byte blocks on the selected LUN */
 extern int lr_lun;

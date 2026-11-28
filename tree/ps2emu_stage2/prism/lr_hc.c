@@ -85,6 +85,10 @@
 
 u8 *lr_dma;
 u8 lr_swap;	/* 1 = the bridge reverses the bytes inside each 32-bit word of DATA (see lr_usb.c) */
+#if defined(PS2HWEMU)
+u32 lr_hc_tok;	/* A01 (2026-11-27): the halted qTD's token of the last failed transfer, so a caller can
+		 * tell "nobody answered" (Halted + XactErr only) from "someone answered wrongly" */
+#endif
 
 static u64 op, pbase, bbase;
 static u32 *ring_sent;
@@ -226,7 +230,11 @@ static int ring_check(u32 **psent, u32 **phead)
 			return LR_E_STATE;
 		if (nx == anc)
 			seen_anc = 1;
+#if defined(PS2HWEMU)
+		if ((vrd(nx + 1) & 0x7c) == 0x7c)	/* lr_usb.c set_addr() may take any of 124..127 */
+#else
 		if ((vrd(nx + 1) & 0x7f) == LR_USB_ADDR)
+#endif
 			clash = 1;
 		p = nx;
 	}
@@ -538,6 +546,9 @@ static int run(int q, int n, u32 timeout_ms)
 	u64 end;
 	int r, i;
 
+#if defined(PS2HWEMU)
+	lr_hc_tok = 0;
+#endif
 	r = alive();
 	if (r)
 		return r;
@@ -565,6 +576,9 @@ static int run(int q, int n, u32 timeout_ms)
 
 			if (t & T_HALTED)
 			{
+#if defined(PS2HWEMU)
+				lr_hc_tok = t;
+#endif
 				r = (t & T_ERRBITS) ? LR_E_XACT : LR_E_STALL;
 				break;
 			}

@@ -185,3 +185,28 @@ int fi_args(uint64_t device, const char *hdr_path, const uint32_t *lba, const ui
 	}
 	return total;
 }
+
+int ps3_args(uint64_t device, const uint32_t *lba, const uint32_t *cnt, int n, uint8_t *out, int cap)
+{
+	int total = 20 + 8 * n, i;
+	uint8_t *sec, *siz;
+
+	if (n < 1 || total > cap || total > FI_ARGS_MAX)
+		return -1;
+	memset(out, 0, total);
+	be32(out, (uint32_t)(device >> 32));
+	be32(out + 4, (uint32_t)device);
+	be32(out + 8, FI_EMU_PS3);
+	be32(out + 12, (uint32_t)n);
+	be32(out + 16, 0);
+	sec = out + 20;
+	siz = sec + 4 * n;
+	for (i = 0; i < n; i++)
+	{
+		if (!cnt[i])
+			return -1;
+		be32(sec + 4 * i, lba[i]);
+		be32(siz + 4 * i, cnt[i]);
+	}
+	return total;
+}

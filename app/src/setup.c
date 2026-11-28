@@ -37,7 +37,7 @@
 #include "webman.h"
 
 #define APP_SETUP	"/dev_hdd0/game/PRSM00001/USRDIR/setup"
-/* v0.54: on a CECHA / CECHB (chk.a01) the A01 helper (lr/out/lr_hw5k11.bin, built for ps2_emu) is
+/* v0.54: on a CECHA / CECHB (chk.a01) the A01 helper (lr/out/lr_hw5a.bin since v0.82; lr_hw5k11 before; built for ps2_emu) is
  * installed under its own name and loaded through ps2_emu's stage2 slot; the E01 lines are as before */
 #define SRC_STAGE2	(chk.a01 ? APP_SETUP "/prism_stage2_a01.bin" : APP_SETUP "/prism_stage2.bin")
 #define SRC_CARRIER	APP_SETUP "/carrier.iso"

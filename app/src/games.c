@@ -17,6 +17,7 @@
 
 int lr_fs_cat_where(u32 i, int *exfat, u32 *part);	/* lr_fs.c, LR_APP (v0.73) */
 #include "cardcheck.h"	/* v0.65 */
+#include "exfat_card.h"	/* v0.82: the card's exFAT PS3ISO folder */
 
 game_t games[N_PLAT][MAX_GAMES];
 int n_games[N_PLAT];
@@ -198,6 +199,60 @@ static void scan_ps2(void)
 			card_read_mask & 4 ? " CompactFlash" : "", card_read_mask ? "" : " none");
 		fclose(lg);
 	}
+}
+
+/* v0.82: PS3 ISOs on the exFAT part of every card Prism read (GameOS sees only a card's FAT32 part, whose PS3ISO
+ * folder scan_dir lists). Played from the card by ps3sd.c: g->exfat = 1, g->path = "<slot dir>/PS3ISO/<name>.iso", a
+ * split set by the name of its whole (its ".iso.0" part names it; the other parts are not games). */
+static int ps3x_cb(void *arg, const char *name, uint64_t size, int is_dir)
+{
+	static const char *const sdir[3] = { "/dev_ms", "/dev_sd", "/dev_cf" };
+	static const u8 swhere[3] = { WHERE_MS, 0, WHERE_CF };
+	int d = *(const int *)arg;
+	char nm[104];
+	size_t n;
+	game_t *g;
+
+	if (is_dir || !size || name[0] == '.' || n_games[P_PS3] >= MAX_GAMES)
+		return 0;
+	snprintf(nm, sizeof nm, "%s", name);
+	n = strlen(nm);
+	if (ends_ci(nm, ".iso.0"))
+		nm[n - 2] = 0;
+	else if (!ends_ci(nm, ".iso"))
+		return 0;
+	g = &games[P_PS3][n_games[P_PS3]++];
+	memset(g, 0, sizeof(*g));
+	snprintf(g->name, sizeof(g->name), "%s", nm);
+	snprintf(g->path, sizeof(g->path), "%s/PS3ISO/%s", sdir[d], nm);
+	g->size = size;
+	g->where = swhere[d];
+	g->slot = (u8)d;
+	g->exfat = 1;
+	g->kind = 0;
+	return 0;
+}
+
+static void scan_ps3_cards(void)
+{
+	static const u64 devs[3] = { ST_DEV_MS, ST_DEV_SD, ST_DEV_CF };
+	u64 keep = card_dev;
+	exw_dev dv;
+	char why[160];
+	int d;
+
+	for (d = 0; d < 3; d++)
+	{
+		if (!(card_read_mask & (1 << d)))
+			continue;
+		card_dev = devs[d];	/* exc_open opens card_dev */
+		if (exc_open(&dv, why, sizeof why) == 0)
+		{
+			exw_list(&dv, "PS3ISO", ps3x_cb, &d, why, sizeof why);
+			exc_close();
+		}
+	}
+	card_dev = keep;
 }
 
 const char *game_where_name(const game_t *g)
@@ -550,6 +605,7 @@ void games_scan(void)
 		scan_dir(P_PSP, p, (int)i);
 	}
 	scan_ps2();
+	scan_ps3_cards();			/* v0.82: after scan_ps2, which says which cards were read */
 	scan_fs_ps2("/dev_hdd0/PS2ISO", 2);	/* v0.16 */
 	for (i = 3; i <= 10; i++)
 	{

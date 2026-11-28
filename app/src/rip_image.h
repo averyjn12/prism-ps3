@@ -763,8 +763,12 @@ static int rip_ps_image(int plat, unsigned type, char *msg, int msg_n)
 		r = 1;
 		goto finish;
 	}
-	if (d == EXF)
+	if (IS_EXF(d))
 	{
+		/* v0.82: one exFAT entry per card slot (rip.c devs[]): exc_open opens card_dev, so the chosen slot's (back at finish:) */
+		exf_keep_dev = card_dev;
+		exf_swapped = 1;
+		card_dev = slot_storage(EXF_SLOT(d));
 		if (exc_open(&dv, why, sizeof why) || exw_begin(&dv, dest_sub, dest_name, total, why, sizeof why))
 		{
 			exc_close();
@@ -872,6 +876,11 @@ static int rip_ps_image(int plat, unsigned type, char *msg, int msg_n)
 			snprintf(msg, msg_n, "%s copied to %s: %.0f MB in %d:%02d", title, devs[d].name, total / 1e6, (int)secs / 60, (int)secs % 60);
 	}
 finish:
+	if (exf_swapped)
+	{
+		card_dev = exf_keep_dev;
+		exf_swapped = 0;
+	}
 	ps2_img = 0;
 	free(b);
 	img_raw = NULL;
